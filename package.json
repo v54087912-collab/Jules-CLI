@@ -1,0 +1,39 @@
+{
+  "name": "jules-cli",
+  "version": "1.0.0",
+  "description": "Jules CLI - Google DeepMind Sync Engine",
+  "main": "dist/index.js",
+  "bin": {
+    "jules": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "node node_modules/typescript/bin/tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@octokit/rest": "^22.0.1",
+    "@types/cli-progress": "^3.11.6",
+    "@types/diff": "^7.0.2",
+    "@types/node": "^25.9.2",
+    "axios": "^1.17.0",
+    "boxen": "^8.0.1",
+    "chalk": "^4.1.2",
+    "cli-progress": "^3.12.0",
+    "commander": "^15.0.0",
+    "diff": "^9.0.0",
+    "dotenv": "^17.4.2",
+    "ink": "^7.0.5",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "ora": "^5.4.1",
+    "react": "^19.2.7",
+    "simple-git": "^3.36.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
+  }
+}
