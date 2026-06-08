@@ -6,7 +6,7 @@ import readline from 'readline';
 import chalk from 'chalk';
 import { parsePatch, formatPatch } from 'diff';
 import { validateEnv, logger, printBanner, askUser, shellState, closeAskUser, downloadFile, loadSettings, saveSettings } from './utils';
-import { initGit, syncLocalChanges, getRemoteUrl, setRemote, getCurrentBranch, isGitRepo } from './git';
+import { initGit, syncLocalChanges, getRemoteUrl, setRemote, getCurrentBranch, isGitRepo, syncBranchAndPull } from './git';
 import { createShadowRepo, createJulesSession, getSessionStatus, getSessionActivities, sendJulesMessage, approveJulesPlan, listJulesSessions, deleteJulesSession } from './api';
 import { applyChanges, CodeChange } from './patcher';
 import fs from 'fs';
@@ -857,6 +857,22 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
   console.log(chalk.dim('\n── Synced with Jules Web Session ──'));
   console.log(chalk.dim(`Session: ${sessionId}`));
   console.log(chalk.dim('────────────────────────────────────\n'));
+
+  // Synchronize local workspace with remote branch before starting live tracking
+  try {
+    const status = await getSessionStatus(sessionId);
+    let headBranch: string | undefined;
+    if (status.outputs && Array.isArray(status.outputs)) {
+      for (const out of status.outputs) {
+        if (out.pullRequest?.headRef) {
+          headBranch = out.pullRequest.headRef;
+        }
+      }
+    }
+    await syncBranchAndPull(headBranch);
+  } catch (e) {
+    // Ignore sync errors, proceed to tracking loop
+  }
 
   readline.emitKeypressEvents(process.stdin);
   const wasRaw = process.stdin.isRaw;

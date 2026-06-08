@@ -95,3 +95,29 @@ export async function getCurrentBranch(): Promise<string> {
   const branch = await git.cwd(process.cwd()).branch();
   return branch.current;
 }
+
+export async function syncBranchAndPull(headBranch?: string): Promise<void> {
+  if (!(await isGitRepo())) return;
+  const localGit = git.cwd(process.cwd());
+  
+  try {
+    const targetBranch = headBranch || (await localGit.branch()).current;
+    logger.info(`Syncing local workspace with remote branch: ${targetBranch}...`);
+    
+    // Fetch
+    await localGit.fetch('origin', targetBranch);
+    
+    // Checkout if needed
+    const current = (await localGit.branch()).current;
+    if (headBranch && current !== headBranch) {
+      await localGit.checkout(headBranch);
+      logger.success(`Checked out branch: ${headBranch}`);
+    }
+    
+    // Pull
+    await localGit.pull('origin', targetBranch, ['--rebase']);
+    logger.success('Local workspace successfully synced with remote.');
+  } catch (error: any) {
+    logger.warn(`Failed to sync workspace: ${error.message}`);
+  }
+}
