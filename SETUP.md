@@ -5,9 +5,24 @@ This guide provides everything you need to set up, configure, and master the Jul
 ---
 
 ## 🛠 Step 1: Requirements & API Keys
-Ensure you are in the project folder:
+
+> [!IMPORTANT]
+> **Android / Termux Users:**
+> Android's shared storage (`/storage/emulated/0`) does not support symbolic links or execution permissions. To install dependencies and compile the CLI, you **must** copy the project directory to Termux's internal storage (e.g. `/data/data/com.termux/files/home/.gemini/antigravity-cli/scratch/Jules-CLI`):
+> ```bash
+> cp -R "/storage/emulated/0/Jules-CLI-Jules-CLI" "/data/data/com.termux/files/home/.gemini/antigravity-cli/scratch/Jules-CLI"
+> cd "/data/data/com.termux/files/home/.gemini/antigravity-cli/scratch/Jules-CLI"
+> npm install --no-audit --no-fund --prefer-offline
+> npm run build
+> ```
+
+Ensure you are in the active project folder:
 ```bash
-cd "/storage/emulated/0/jules-local-bridge"
+# On Termux:
+cd "/data/data/com.termux/files/home/.gemini/antigravity-cli/scratch/Jules-CLI"
+
+# On PC / other platforms:
+cd "/storage/emulated/0/Jules-CLI-Jules-CLI"
 ```
 
 ### **1. Configure Environment**
@@ -38,7 +53,14 @@ Jules Local Bridge operates within a dedicated workspace:
 The CLI handles the heavy lifting automatically:
 1. **Add Project**: Copy your project folder to `/storage/emulated/0/Jules-Workspace/my-project`.
 2. **Navigate**: `cd "/storage/emulated/0/Jules-Workspace/my-project"`
-3. **Launch**: `node ../jules-local-bridge/dist/index.js`
+3. **Launch**:
+   ```bash
+   # On Termux:
+   node /data/data/com.termux/files/home/.gemini/antigravity-cli/scratch/Jules-CLI/dist/index.js
+
+   # On PC / other platforms:
+   node ../Jules-CLI-Jules-CLI/dist/index.js
+   ```
 4. **Auto-Initialization**: The CLI will:
    - Initialize Git locally.
    - Create and link a **private shadow repository** on GitHub.

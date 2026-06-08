@@ -23,10 +23,24 @@
 
 Follow these steps to get Jules Local Bridge up and running:
 
+> [!IMPORTANT]
+> **Android / Termux Users:**
+> Android's shared storage (`/storage/emulated/0`) does not support symbolic links or execution permissions. To install dependencies and compile the CLI, you **must** copy the project directory to Termux's internal storage (e.g. `/data/data/com.termux/files/home/.gemini/antigravity-cli/scratch/Jules-CLI`):
+> ```bash
+> cp -R "/storage/emulated/0/Jules-CLI-Jules-CLI" "/data/data/com.termux/files/home/.gemini/antigravity-cli/scratch/Jules-CLI"
+> cd "/data/data/com.termux/files/home/.gemini/antigravity-cli/scratch/Jules-CLI"
+> npm install --no-audit --no-fund --prefer-offline
+> npm run build
+> ```
+
 ### **1. Requirements & API Keys**
-Ensure you are in the project folder:
+Ensure you are in the active project directory:
 ```bash
-cd "/storage/emulated/0/jules-local-bridge"
+# On Termux:
+cd "/data/data/com.termux/files/home/.gemini/antigravity-cli/scratch/Jules-CLI"
+
+# On PC / other platforms:
+cd "/storage/emulated/0/Jules-CLI-Jules-CLI"
 ```
 
 #### **Configure Environment**
@@ -56,7 +70,11 @@ Jules operates inside a dedicated workspace: `/storage/emulated/0/Jules-Workspac
 ### **3. Launch Jules**
 Run the CLI from your project directory:
 ```bash
-node ../jules-local-bridge/dist/index.js
+# On Termux:
+node /data/data/com.termux/files/home/.gemini/antigravity-cli/scratch/Jules-CLI/dist/index.js
+
+# On PC / other platforms:
+node ../Jules-CLI-Jules-CLI/dist/index.js
 ```
 
 ---
