@@ -1633,6 +1633,7 @@ async function handleShortcutsCommand() {
     { keys: 'Ctrl + Z',     desc: 'Suspend CLI process (SIGTSTP)' },
     { keys: 'Ctrl + \\',    desc: 'Terminate CLI process (SIGQUIT)' },
     { keys: 'Ctrl + C',     desc: 'Cancel current input or exit search mode' },
+    { keys: 'End + D',      desc: 'Delete workspace and restart' },
     { keys: 'Tab',          desc: 'Cycle autocomplete suggestions' },
     { keys: 'Shift+Tab/Meta+Tab', desc: 'Cycle autocomplete suggestions in reverse' },
   ]);
@@ -1845,7 +1846,7 @@ async function startShell() {
   await ensureGitAndRemoteLinked();
   printBanner();
 
-  const commandsList = ['/init', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/help', '/docs', '/shot', '/exit'];
+  const commandsList = ['/init', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/help', '/docs', '/shot', '/deleteworkspace', '/exit'];
 
   const PROMPT_STR = '> ';
   const PROMPT_LEN = PROMPT_STR.length;
@@ -2449,6 +2450,28 @@ async function startShell() {
         return;
       }
 
+      // End + D (Delete workspace and restart)
+      if (key.name === 'end' && (char === 'd' || char === 'D')) {
+        const wsRoot = getWorkspaceRoot();
+        logger.info(`\nDeleting workspace: ${wsRoot}...`);
+        try {
+          if (fs.existsSync(wsRoot)) {
+            fs.rmSync(wsRoot, { recursive: true, force: true });
+          }
+          logger.success('Workspace deleted. Restarting Jules CLI...');
+          const { spawn } = require('child_process');
+          const child = spawn(process.argv[0], process.argv.slice(1), {
+            detached: true,
+            stdio: 'inherit'
+          });
+          child.unref();
+          process.exit(0);
+        } catch (err: any) {
+          logger.error(`Failed to delete workspace: ${err.message}`);
+        }
+        return;
+      }
+
       // Ctrl + X prefixed commands
       if (key.ctrl && key.name === 'x') {
         ctrlXPrefix = true;
@@ -2736,6 +2759,31 @@ async function startShell() {
           }
           break;
 
+        case '/deleteworkspace':
+          try {
+            const wsRoot = getWorkspaceRoot();
+            logger.info(`Deleting workspace: ${wsRoot}...`);
+            
+            // Delete workspace
+            if (fs.existsSync(wsRoot)) {
+              fs.rmSync(wsRoot, { recursive: true, force: true });
+            }
+            
+            logger.success('Workspace deleted. Restarting Jules CLI...');
+            
+            // Restart
+            const { spawn } = require('child_process');
+            const child = spawn(process.argv[0], process.argv.slice(1), {
+              detached: true,
+              stdio: 'inherit'
+            });
+            child.unref();
+            process.exit(0);
+          } catch (err: any) {
+            logger.error(`Failed to delete workspace: ${err.message}`);
+          }
+          break;
+
         case '/help':
           console.log('');
           console.log(chalk.bold.white('  Commands:'));
@@ -2753,6 +2801,7 @@ async function startShell() {
           cmd('/fast',                   'Switch to auto plan mode (default)');
           cmd('/docs',                   'Full documentation');
           cmd('/shot',                   'Show keyboard shortcuts manual');
+          cmd('/deleteworkspace',        'Delete workspace and restart');
           cmd('/clear',                  'Clear terminal');
           cmd('/help',                   'Show this menu');
           cmd('/exit',                   'Quit');
