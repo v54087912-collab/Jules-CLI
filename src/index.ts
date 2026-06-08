@@ -951,6 +951,8 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
     }
   };
 
+  let initialized = false;
+
   try {
     while (!completed) {
       if (taskCancelled) {
@@ -1056,6 +1058,31 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
         let activities: any[] = [];
         try {
           activities = await getSessionActivities(sessionId);
+          if (!initialized) {
+            const agentMsgs = activities.filter((a: any) => a.agentMessaged?.agentMessage);
+            if (agentMsgs.length > 0) {
+              for (let i = 0; i < agentMsgs.length - 1; i++) {
+                if (agentMsgs[i].id) {
+                  printedAgentMessages.add(agentMsgs[i].id);
+                  repliedActivities.add(agentMsgs[i].id);
+                }
+              }
+              const isWaitingForInput = status.requires_user_input === true || 
+                                        ['inactive', 'question', 'interrupt', 'user_input_required'].includes(status.state?.toLowerCase() || status.type?.toLowerCase() || '');
+              const lastMsg = agentMsgs[agentMsgs.length - 1];
+              if (!isWaitingForInput) {
+                if (lastMsg.id) {
+                  printedAgentMessages.add(lastMsg.id);
+                  repliedActivities.add(lastMsg.id);
+                }
+              }
+            }
+            for (const act of activities) {
+              if (act.name) seenActivities.add(act.name);
+              if (act.id) seenActivities.add(act.id);
+            }
+            initialized = true;
+          }
         } catch (actError: any) {
           if (actError.response?.status !== 404) {
             // Ignore network errors in activities fetch
