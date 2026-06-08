@@ -362,7 +362,7 @@ async function promptJulesReply(cleanHeader: string): Promise<string> {
 
     const separator = chalk.dim('─'.repeat(Math.max(0, cols - 1)));
     const left = '/shot for shortcuts';
-    const right = '/exit';
+    const right = '/session';
     const spaceCount = Math.max(2, cols - left.length - right.length - 10);
     const footer = chalk.dim('  ' + left + ' '.repeat(spaceCount) + right);
 
@@ -607,7 +607,7 @@ async function promptJulesReply(cleanHeader: string): Promise<string> {
       const line = rl!.line;
       let newMatches: string[] = [];
       if (line.startsWith('/')) {
-        newMatches = ['/usage', '/plan', '/fast', '/clear', '/help', '/docs', '/shot', '/exit'].filter(c => c.startsWith(line));
+        newMatches = ['/session', '/usage', '/plan', '/fast', '/clear', '/help', '/docs', '/shot', '/exit'].filter(c => c.startsWith(line));
         if (newMatches.length > 0 && line === newMatches[0]) {
           newMatches = [];
         }
@@ -642,8 +642,34 @@ async function promptJulesReply(cleanHeader: string): Promise<string> {
       } else {
         const cmd = line.trim().toLowerCase();
         const baseCmd = cmd.split(' ')[0];
-        if (['/init', '/sync', '/edit', '/restore', '/session'].includes(baseCmd)) {
+        if (['/init', '/sync', '/edit', '/restore'].includes(baseCmd)) {
           logger.error(`Command ${baseCmd} is not available during an active session.`);
+          rl!.prompt();
+          drawReplyBottomArea();
+          return;
+        }
+
+        if (baseCmd === '/session') {
+          const args = line.trim().split(' ').slice(1);
+          const subcommand = args[0]?.toLowerCase();
+          if (subcommand === 'untrack' || subcommand === 'clear' || subcommand === 'reset') {
+            if (resolveReply) {
+              resolveReply('/untrack');
+            }
+            return;
+          }
+          if (subcommand === 'ls' || subcommand === 'list') {
+            try {
+              rl!.pause();
+              await handleSessionCommand(['list']);
+            } finally {
+              rl!.resume();
+              rl!.prompt();
+              drawReplyBottomArea();
+            }
+            return;
+          }
+          logger.error(`Subcommand /session ${subcommand || ''} is not available during an active session. Use /session untrack first.`);
           rl!.prompt();
           drawReplyBottomArea();
           return;
