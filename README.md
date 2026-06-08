@@ -117,11 +117,13 @@ npm run dev
 
 ---
 
-## 💬 Support & Developer Info
+## 💬 Project Info & Support
 
+- **Open Source**: Jules CLI is an Open Source project.
+- **GitHub Repository**: [https://github.com/v54087912-collab/Jules-CLI.git](https://github.com/v54087912-collab/Jules-CLI.git)
 - **Contact Developer**: [https://t.me/R3V_X](https://t.me/R3V_X)
 - **Community Link**: [https://t.me/allinformation0173](https://t.me/allinformation0173)
-- **Instagram**: [https://www.instagram.com/opeditzxx/?utm_source=qr&r=nametag](https://www.instagram.com/opeditzxx/?utm_source=qr&r=nametag)
+- **Instagram**: [https://www.instagram.com/opeditzxx/](https://www.instagram.com/opeditzxx/)
 
 ---
 

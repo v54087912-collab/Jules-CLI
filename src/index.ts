@@ -727,6 +727,15 @@ async function promptJulesReply(cleanHeader: string): Promise<string> {
           console.log(`    ${chalk.bold.cyan('/fast'.padEnd(28))} ${chalk.dim('Switch to automatic plan approval')}`);
           console.log(`    ${chalk.bold.cyan('/exit'.padEnd(28))} ${chalk.dim('Quit session')}`);
           console.log('');
+          console.log(chalk.bold.white('  Project Information:'));
+          console.log(`    ${chalk.bold.cyan('Open Source'.padEnd(28))} ${chalk.dim('Jules CLI is an Open Source project')}`);
+          console.log(`    ${chalk.bold.cyan('GitHub'.padEnd(28))} ${chalk.dim('https://github.com/v54087912-collab/Jules-CLI.git')}`);
+          console.log('');
+          console.log(chalk.bold.white('  Support & Links:'));
+          console.log(`    ${chalk.bold.cyan('Developer'.padEnd(28))} ${chalk.dim('https://t.me/R3V_X')}`);
+          console.log(`    ${chalk.bold.cyan('Community'.padEnd(28))} ${chalk.dim('https://t.me/allinformation0173')}`);
+          console.log(`    ${chalk.bold.cyan('Instagram'.padEnd(28))} ${chalk.dim('https://www.instagram.com/opeditzxx/')}`);
+          console.log('');
           rl!.prompt();
           drawReplyBottomArea();
           return;
@@ -1678,10 +1687,14 @@ async function handleDocs() {
   console.log(chalk.white('   Your sessions and shadow repositories are stored in the cloud.'));
   console.log(chalk.white('   Access them anytime at https://jules.google.com'));
 
-  console.log(`\n${chalk.bold.cyan('8. CONTACT & COMMUNITY')}`);
-  console.log(chalk.white('   • Developer : https://t.me/R3V_X'));
-  console.log(chalk.white('   • Community : https://t.me/allinformation0173'));
-  console.log(chalk.white('   • Instagram : https://www.instagram.com/opeditzxx/'));
+  console.log(`\n${chalk.bold.cyan('8. PROJECT INFORMATION')}`);
+  console.log(chalk.white('   • Open Source : Jules CLI is an Open Source project'));
+  console.log(chalk.white('   • GitHub      : https://github.com/v54087912-collab/Jules-CLI.git'));
+  
+  console.log(`\n${chalk.bold.cyan('9. CONTACT & COMMUNITY')}`);
+  console.log(chalk.white('   • Developer   : https://t.me/R3V_X'));
+  console.log(chalk.white('   • Community   : https://t.me/allinformation0173'));
+  console.log(chalk.white('   • Instagram   : https://www.instagram.com/opeditzxx/'));
 
   console.log('\n' + chalk.dim('─'.repeat(60)));
   console.log(chalk.italic.dim('   Happy Coding with Jules!'));
@@ -2852,9 +2865,14 @@ async function startShell() {
           console.log('');
           console.log(chalk.dim('  Or just type your instruction and press Enter'));
           console.log('');
-          console.log(chalk.bold.white('  Support:'));
+          console.log(chalk.bold.white('  Project Information:'));
+          console.log(`    ${chalk.bold.cyan('Open Source'.padEnd(28))} ${chalk.dim('Jules CLI is an Open Source project')}`);
+          console.log(`    ${chalk.bold.cyan('GitHub'.padEnd(28))} ${chalk.dim('https://github.com/v54087912-collab/Jules-CLI.git')}`);
+          console.log('');
+          console.log(chalk.bold.white('  Support & Links:'));
           console.log(`    ${chalk.bold.cyan('Developer'.padEnd(28))} ${chalk.dim('https://t.me/R3V_X')}`);
           console.log(`    ${chalk.bold.cyan('Community'.padEnd(28))} ${chalk.dim('https://t.me/allinformation0173')}`);
+          console.log(`    ${chalk.bold.cyan('Instagram'.padEnd(28))} ${chalk.dim('https://www.instagram.com/opeditzxx/')}`);
           console.log('');
           break;
         case '/clear':

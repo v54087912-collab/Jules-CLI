@@ -101,7 +101,9 @@ The `jules > ` shell is packed with real-time features:
 
 ---
 
-## 💬 Step 8: Support & Links
+## 💬 Step 8: Project Info & Support
+- **Open Source**: Jules CLI is an Open Source project.
+- **GitHub**: [https://github.com/v54087912-collab/Jules-CLI.git](https://github.com/v54087912-collab/Jules-CLI.git)
 - **Developer**: [https://t.me/R3V_X](https://t.me/R3V_X)
 - **Community**: [https://t.me/allinformation0173](https://t.me/allinformation0173)
 - **Instagram**: [https://www.instagram.com/opeditzxx/](https://www.instagram.com/opeditzxx/)
