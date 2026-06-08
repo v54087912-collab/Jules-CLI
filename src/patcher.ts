@@ -11,6 +11,96 @@ export interface CodeChange {
   diff: string;
 }
 
+function applyPatchFuzzy(content: string, patchDiff: string): string | false {
+  const patches = parsePatch(patchDiff);
+  if (patches.length === 0) return false;
+
+  let fileLines = content.split(/\r?\n/);
+
+  for (const patch of patches) {
+    let lineOffset = 0;
+
+    for (const hunk of patch.hunks) {
+      const oldStart = hunk.oldStart - 1;
+      const expectedOldLines: string[] = [];
+      const expectedNewLines: string[] = [];
+
+      for (const line of hunk.lines) {
+        const type = line[0];
+        const text = line.slice(1);
+        if (type === ' ') {
+          expectedOldLines.push(text);
+          expectedNewLines.push(text);
+        } else if (type === '-') {
+          expectedOldLines.push(text);
+        } else if (type === '+') {
+          expectedNewLines.push(text);
+        }
+      }
+
+      const matchesSequence = (startIdx: number, seq: string[]) => {
+        if (startIdx < 0 || startIdx + seq.length > fileLines.length) return false;
+        for (let i = 0; i < seq.length; i++) {
+          if (fileLines[startIdx + i].trim() !== seq[i].trim()) {
+            return false;
+          }
+        }
+        return true;
+      };
+
+      let foundIdx = -1;
+      let alreadyApplied = false;
+      const maxSearch = Math.max(fileLines.length, 100);
+
+      for (let offset = 0; offset < maxSearch; offset++) {
+        const idxDown = oldStart + lineOffset + offset;
+        if (idxDown >= 0 && idxDown < fileLines.length) {
+          if (matchesSequence(idxDown, expectedOldLines)) {
+            foundIdx = idxDown;
+            break;
+          }
+          if (matchesSequence(idxDown, expectedNewLines)) {
+            foundIdx = idxDown;
+            alreadyApplied = true;
+            break;
+          }
+        }
+        if (offset > 0) {
+          const idxUp = oldStart + lineOffset - offset;
+          if (idxUp >= 0 && idxUp < fileLines.length) {
+            if (matchesSequence(idxUp, expectedOldLines)) {
+              foundIdx = idxUp;
+              break;
+            }
+            if (matchesSequence(idxUp, expectedNewLines)) {
+              foundIdx = idxUp;
+              alreadyApplied = true;
+              break;
+            }
+          }
+        }
+      }
+
+      if (foundIdx === -1) {
+        return false;
+      }
+
+      if (alreadyApplied) {
+        lineOffset += expectedNewLines.length - expectedOldLines.length;
+        continue;
+      }
+
+      const beforeHunk = fileLines.slice(0, foundIdx);
+      const afterHunk = fileLines.slice(foundIdx + expectedOldLines.length);
+      
+      fileLines = [...beforeHunk, ...expectedNewLines, ...afterHunk];
+      lineOffset += expectedNewLines.length - expectedOldLines.length;
+    }
+  }
+
+  return fileLines.join('\n');
+}
+
 
 export async function applyChanges(changes: CodeChange[]): Promise<boolean> {
   // 1. Show Diff Preview
@@ -66,7 +156,12 @@ export async function applyChanges(changes: CodeChange[]): Promise<boolean> {
       }
 
       // Handle new file creation if the patch is for a new file
-      const patchedContent = applyPatch(currentContent, change.diff);
+      let patchedContent = applyPatch(currentContent, change.diff);
+      
+      if (patchedContent === false) {
+        // Fallback: Try fuzzy patching (handles CRLF, duplicate lines, or context mismatches)
+        patchedContent = applyPatchFuzzy(currentContent, change.diff);
+      }
       
       if (patchedContent === false) {
         const patches = parsePatch(change.diff);
