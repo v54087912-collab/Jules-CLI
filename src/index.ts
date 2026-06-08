@@ -267,6 +267,8 @@ async function promptJulesReply(cleanHeader: string): Promise<string> {
   const oldKeypressHandler = shellState.keypressHandler;
   
   let tempRl: readline.Interface | null = null;
+  let resolveReply: ((value: string) => void) | null = null;
+  let lineHandlerRef: ((line: string) => void) | null = null;
   let rl = shellState.activeRl;
   if (!rl) {
     tempRl = readline.createInterface({
@@ -434,6 +436,35 @@ async function promptJulesReply(cleanHeader: string): Promise<string> {
 
   const keypressHandler = (char: any, key: any) => {
     const seq = key?.sequence || char || '';
+    const isEnd = key && key.name === 'end';
+    
+    if (isEnd) {
+      clearReplyBottomAreaOnEnter();
+      disableReplyBracketedPaste();
+      process.off('exit', disableReplyBracketedPaste);
+      process.stdin.removeListener('keypress', keypressHandler);
+      rl.off('SIGINT', sigintHandler);
+      if (lineHandlerRef) {
+        rl!.off('line', lineHandlerRef);
+      }
+      if (tempRl) {
+        tempRl.close();
+        if (process.stdin.isTTY) {
+          process.stdin.setRawMode(false);
+        }
+      } else {
+        if (oldLineHandler) {
+          rl!.on('line', oldLineHandler);
+        }
+        if (oldKeypressHandler) {
+          process.stdin.prependListener('keypress', oldKeypressHandler);
+        }
+      }
+      if (resolveReply) {
+        resolveReply('/untrack');
+      }
+      return;
+    }
     
     if (seq === '\u001b[200~') {
       isPasting = true;
@@ -596,6 +627,7 @@ async function promptJulesReply(cleanHeader: string): Promise<string> {
   rl.on('SIGINT', sigintHandler);
 
   return new Promise<string>((resolve) => {
+    resolveReply = resolve;
     const lineHandler = async (line: string) => {
       clearReplyBottomAreaOnEnter();
       
@@ -730,6 +762,7 @@ async function promptJulesReply(cleanHeader: string): Promise<string> {
         resolve(substitutedLine);
       }
     };
+    lineHandlerRef = lineHandler;
 
     rl!.on('line', lineHandler);
   });
@@ -751,6 +784,17 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
 
   let taskCancelled = false;
   let taskUntracked = false;
+  
+  const performUntrack = () => {
+    if (spinner && spinner.isSpinning) spinner.stop();
+    clearInterval(verbInterval);
+    logger.info('Untracking session locally (it will continue running in the cloud)...');
+    if (shellState.trackedSessionId === sessionId) {
+      shellState.trackedSessionId = null;
+      saveSettings({ trackedSessionId: null });
+    }
+    completed = true;
+  };
   const sessionKeypressHandler = (char: any, key: any) => {
     const isEscape = (key && key.name === 'escape') || char === '\u001b' || char === '\x1b';
     const isCtrlC = (key && key.ctrl && key.name === 'c') || char === '\u0003';
@@ -886,14 +930,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
         break;
       }
       if (taskUntracked) {
-        if (spinner.isSpinning) spinner.stop();
-        clearInterval(verbInterval);
-        logger.info('Untracking session locally (it will continue running in the cloud)...');
-        if (shellState.trackedSessionId === sessionId) {
-          shellState.trackedSessionId = null;
-          saveSettings({ trackedSessionId: null });
-        }
-        completed = true;
+        performUntrack();
         break;
       }
 
@@ -935,6 +972,10 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
             completed = true;
             break;
           }
+          if (userReply.trim().toLowerCase() === '/untrack') {
+            performUntrack();
+            break;
+          }
 
           const msgSpinner = ora({ text: chalk.dim('Sending response…'), spinner: 'dots', color: 'white' }).start();
           const bridgedReply = bridgePathsInText(userReply);
@@ -967,14 +1008,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           break;
         }
         if (taskUntracked) {
-          if (spinner.isSpinning) spinner.stop();
-          clearInterval(verbInterval);
-          logger.info('Untracking session locally (it will continue running in the cloud)...');
-          if (shellState.trackedSessionId === sessionId) {
-            shellState.trackedSessionId = null;
-            saveSettings({ trackedSessionId: null });
-          }
-          completed = true;
+          performUntrack();
           break;
         }
 
@@ -1005,14 +1039,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           break;
         }
         if (taskUntracked) {
-          if (spinner.isSpinning) spinner.stop();
-          clearInterval(verbInterval);
-          logger.info('Untracking session locally (it will continue running in the cloud)...');
-          if (shellState.trackedSessionId === sessionId) {
-            shellState.trackedSessionId = null;
-            saveSettings({ trackedSessionId: null });
-          }
-          completed = true;
+          performUntrack();
           break;
         }
 
@@ -1046,6 +1073,10 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
 
           if (userReply.trim().toLowerCase() === '/exit') {
             completed = true;
+            break;
+          }
+          if (userReply.trim().toLowerCase() === '/untrack') {
+            performUntrack();
             break;
           }
 
@@ -1301,6 +1332,10 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
 
           if (userReply.trim().toLowerCase() === '/exit') {
             completed = true;
+            break;
+          }
+          if (userReply.trim().toLowerCase() === '/untrack') {
+            performUntrack();
             break;
           }
 
