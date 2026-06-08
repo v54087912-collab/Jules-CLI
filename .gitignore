@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+*.bak
+*.log
+activities*.json
+sessions.json
+all_sessions.json
+current_sessions.json
+recent_5.json
+session_status.json
+mock-jules.js
