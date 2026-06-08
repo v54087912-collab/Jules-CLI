@@ -1,5 +1,23 @@
 # 🌉 Jules Local Bridge
 
+```text
+                                   ▄████████▄
+                                  ███▀    ▀███
+                                 ███  ●  ●  ███
+                                 ███        ███
+                                ▄███  █  █  ███▄
+                               █████  █  █  █████
+                               ▀███▀  ▀  ▀  ▀███▀
+
+                 _ _   _   _ _      _____ ____       ____ _     ___ 
+                | | | | | | | |    | ____/ ___|     / ___| |   |_ _|
+             _  | | | | | | | |    |  _| \___ \    | |   | |    | | 
+            | |_| | | |_| | | |___ | |___ ___) |   | |___| |___ | | 
+             \___/|_|  \___/|_____||_____|____/     \____|_____|___|
+
+                JULES  C L I   —  research preview Developer: Rev
+```
+
 **Jules Local Bridge** is a powerful CLI tool that bridges your local file system with the **Google Jules AI API**. It enables a seamless local development experience by managing a private shadow repository and automatically patching your local files with AI-generated changes.
 
 ---
