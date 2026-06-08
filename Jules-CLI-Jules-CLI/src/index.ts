@@ -76,17 +76,6 @@ function wrapText(text: string, maxWidth: number, indent: string = ''): string {
 }
 
 const settings = loadSettings();
-shellState.trackedSessionId = settings.trackedSessionId || null;
-shellState.trackedSessionUrl = settings.trackedSessionUrl || null;
-
-// Fallback: Extract Session ID from Session URL if missing
-if ((!shellState.trackedSessionId || shellState.trackedSessionId === '(none)') && shellState.trackedSessionUrl) {
-  const parts = shellState.trackedSessionUrl.split('/').filter(Boolean);
-  if (parts.length > 0) {
-    shellState.trackedSessionId = parts[parts.length - 1];
-  }
-}
-
 let currentMode: 'fast' | 'plan' = 'fast';
 
 const isLongPaste = (text: string): boolean => {
@@ -278,18 +267,33 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
   const oldKeypressHandler = shellState.keypressHandler;
   
   let tempRl: readline.Interface | null = null;
+  let resolveReply: ((value: string) => void) | null = null;
+  let lineHandlerRef: ((line: string) => void) | null = null;
   let rl = shellState.activeRl;
   if (!rl) {
-    tempRl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-      prompt: chalk.bold.white('> '),
-      completer: (line: string) => [[], line]
-    });
+    try {
+      tempRl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+        terminal: process.stdin.isTTY,
+        prompt: chalk.bold.white('> '),
+        completer: (line: string) => [[], line]
+      });
+    } catch (e) {
+      tempRl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+        terminal: false,
+        prompt: chalk.bold.white('> '),
+        completer: (line: string) => [[], line]
+      });
+    }
     rl = tempRl;
     readline.emitKeypressEvents(process.stdin);
     if (process.stdin.isTTY) {
-      try { process.stdin.setRawMode(true); } catch (e) {}
+      try {
+        try { process.stdin.setRawMode(true); } catch (e) {}
+      } catch (e) {}
     }
   } else {
     if (oldLineHandler) {
@@ -298,7 +302,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
     if (oldKeypressHandler) {
       process.stdin.removeListener('keypress', oldKeypressHandler);
     }
-    if (!(rl as any).closed) rl.resume();
+    rl.resume();
   }
 
   let liveStatus = '';
@@ -370,6 +374,8 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
     drawReplyBottomArea();
   };
 
+  let lastDrawnReplyFooterText = '';
+
   const clearReplyBottomArea = () => {
     if (activeBottomLines > 0) {
       const col = 2 + rl!.cursor;
@@ -379,17 +385,19 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
       process.stdout.write(`\u001b[${activeBottomLines}A`);
       process.stdout.write('\r' + (col > 0 ? `\u001b[${col}C` : ''));
       activeBottomLines = 0;
+      lastDrawnReplyFooterText = ''; // Reset cache
     }
   };
 
   const drawReplyBottomArea = () => {
-    clearReplyBottomArea();
-
+    if (!(rl as any).terminal) return;
     const cols = process.stdout.columns || 80;
     const separator = chalk.dim('─'.repeat(Math.max(0, cols - 1)));
     const left = '/shot for shortcuts';
     const right = '/session';
-    
+    const spaceCount = Math.max(2, cols - left.length - right.length - 10);
+    const footer = chalk.dim('  ' + left + ' '.repeat(spaceCount) + right);
+
     const lines = [separator];
 
     if (liveStatus) {
@@ -429,14 +437,14 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
       lines.push(formattedText);
     }
 
-    if (cols > 40) {
-      const spaceCount = Math.max(2, cols - left.length - right.length - 10);
-      const footer = chalk.dim('  ' + left + ' '.repeat(spaceCount) + right);
-      lines.push(footer);
-    } else if (cols > 20) {
-      const footer = chalk.dim('  ' + right);
-      lines.push(footer);
+    lines.push(footer);
+
+    const newFooterText = lines.join('\n');
+    if (newFooterText === lastDrawnReplyFooterText && activeBottomLines > 0) {
+      return;
     }
+
+    clearReplyBottomArea();
 
     const currentPrompt = (rl as any)._prompt || '';
     const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
@@ -451,6 +459,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
     process.stdout.write('\r' + (col > 0 ? `\u001b[${col}C` : ''));
 
     activeBottomLines = linesCount;
+    lastDrawnReplyFooterText = newFooterText;
   };
 
   const clearReplyBottomAreaOnEnter = () => {
@@ -466,14 +475,44 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
     activeBottomLines = 0;
     activeMatches = [];
     cyclingIndex = -1;
+    lastDrawnReplyFooterText = ''; // Reset cache
   };
 
   rl.setPrompt(chalk.bold.white('> '));
-  if (!(rl as any).closed) rl.prompt();
+  rl.prompt();
   drawReplyBottomArea();
 
   const keypressHandler = (char: any, key: any) => {
     const seq = key?.sequence || char || '';
+    const isEnd = key && key.name === 'end';
+    
+    if (isEnd) {
+      clearReplyBottomAreaOnEnter();
+      disableReplyBracketedPaste();
+      process.off('exit', disableReplyBracketedPaste);
+      process.stdin.removeListener('keypress', keypressHandler);
+      rl.off('SIGINT', sigintHandler);
+      if (lineHandlerRef) {
+        rl!.off('line', lineHandlerRef);
+      }
+      if (tempRl) {
+        tempRl.close();
+        if (process.stdin.isTTY) {
+          try { try { process.stdin.setRawMode(false); } catch (e) {} } catch (e) {}
+        }
+      } else {
+        if (oldLineHandler) {
+          rl!.on('line', oldLineHandler);
+        }
+        if (oldKeypressHandler) {
+          process.stdin.prependListener('keypress', oldKeypressHandler);
+        }
+      }
+      if (resolveReply) {
+        resolveReply('/untrack');
+      }
+      return;
+    }
     
     if (seq === '\u001b[200~') {
       isPasting = true;
@@ -528,6 +567,9 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
       if (key) { key.name = undefined; key.sequence = ''; }
       return;
     }
+
+    // Reset footer cache on every keypress
+    lastDrawnReplyFooterText = '';
 
     const isEscape = (key && key.name === 'escape') || char === '\u001b' || char === '\x1b';
     if (isEscape) {
@@ -616,7 +658,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
       const line = rl!.line;
       let newMatches: string[] = [];
       if (line.startsWith('/')) {
-        newMatches = ['/init', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/help', '/docs', '/shot', '/exit'].filter(c => c.startsWith(line));
+        newMatches = ['/session', '/usage', '/plan', '/fast', '/clear', '/help', '/docs', '/shot', '/exit'].filter(c => c.startsWith(line));
         if (newMatches.length > 0 && line === newMatches[0]) {
           newMatches = [];
         }
@@ -636,7 +678,8 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
   rl.on('SIGINT', sigintHandler);
 
   return new Promise<string>((resolve) => {
-    const lineHandler = (line: string) => {
+    resolveReply = resolve;
+    const lineHandler = async (line: string) => {
       clearReplyBottomAreaOnEnter();
       
       const endsWithBackslash = line.endsWith('\\');
@@ -645,14 +688,40 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
         accumulatedLines.push(lineToPush);
         altEnterPressed = false;
         rl!.setPrompt('  ');
-        if (!(rl as any).closed) rl!.prompt();
+        rl!.prompt();
         drawReplyBottomArea();
       } else {
         const cmd = line.trim().toLowerCase();
         const baseCmd = cmd.split(' ')[0];
-        if (['/init', '/sync', '/edit', '/restore', '/session'].includes(baseCmd)) {
+        if (['/init', '/sync', '/edit', '/restore'].includes(baseCmd)) {
           logger.error(`Command ${baseCmd} is not available during an active session.`);
-          if (!(rl as any).closed) rl!.prompt();
+          rl!.prompt();
+          drawReplyBottomArea();
+          return;
+        }
+
+        if (baseCmd === '/session') {
+          const args = line.trim().split(' ').slice(1);
+          const subcommand = args[0]?.toLowerCase();
+          if (subcommand === 'untrack' || subcommand === 'clear' || subcommand === 'reset') {
+            if (resolveReply) {
+              resolveReply('/untrack');
+            }
+            return;
+          }
+          if (subcommand === 'ls' || subcommand === 'list') {
+            try {
+              rl!.pause();
+              await handleSessionCommand(['list']);
+            } finally {
+              rl!.resume();
+              rl!.prompt();
+              drawReplyBottomArea();
+            }
+            return;
+          }
+          logger.error(`Subcommand /session ${subcommand || ''} is not available during an active session. Use /session untrack first.`);
+          rl!.prompt();
           drawReplyBottomArea();
           return;
         }
@@ -661,26 +730,41 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
           console.clear();
           console.log(chalk.bold.white('\n' + cleanHeader));
           console.log(chalk.dim('─'.repeat(Math.max(0, cols - 1))));
-          if (!(rl as any).closed) rl!.prompt();
+          rl!.prompt();
           drawReplyBottomArea();
           return;
         }
         if (cmd === '/shot') {
-          handleShortcutsCommand();
-          if (!(rl as any).closed) rl!.prompt();
-          drawReplyBottomArea();
+          try {
+            rl!.pause();
+            await handleShortcutsCommand();
+          } finally {
+            rl!.resume();
+            rl!.prompt();
+            drawReplyBottomArea();
+          }
           return;
         }
         if (cmd === '/docs') {
-          handleDocs();
-          if (!(rl as any).closed) rl!.prompt();
-          drawReplyBottomArea();
+          try {
+            rl!.pause();
+            await handleDocs();
+          } finally {
+            rl!.resume();
+            rl!.prompt();
+            drawReplyBottomArea();
+          }
           return;
         }
         if (cmd === '/usage') {
-          handleUsageCommand();
-          if (!(rl as any).closed) rl!.prompt();
-          drawReplyBottomArea();
+          try {
+            rl!.pause();
+            await handleUsageCommand();
+          } finally {
+            rl!.resume();
+            rl!.prompt();
+            drawReplyBottomArea();
+          }
           return;
         }
         if (cmd === '/help') {
@@ -694,21 +778,30 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
           console.log(`    ${chalk.bold.cyan('/fast'.padEnd(28))} ${chalk.dim('Switch to automatic plan approval')}`);
           console.log(`    ${chalk.bold.cyan('/exit'.padEnd(28))} ${chalk.dim('Quit session')}`);
           console.log('');
-          if (!(rl as any).closed) rl!.prompt();
+          console.log(chalk.bold.white('  Project Information:'));
+          console.log(`    ${chalk.bold.cyan('Open Source'.padEnd(28))} ${chalk.dim('Jules CLI is an Open Source project')}`);
+          console.log(`    ${chalk.bold.cyan('GitHub'.padEnd(28))} ${chalk.dim('https://github.com/v54087912-collab/Jules-CLI.git')}`);
+          console.log('');
+          console.log(chalk.bold.white('  Support & Links:'));
+          console.log(`    ${chalk.bold.cyan('Developer'.padEnd(28))} ${chalk.dim('https://t.me/R3V_X')}`);
+          console.log(`    ${chalk.bold.cyan('Community'.padEnd(28))} ${chalk.dim('https://t.me/allinformation0173')}`);
+          console.log(`    ${chalk.bold.cyan('Instagram'.padEnd(28))} ${chalk.dim('https://www.instagram.com/opeditzxx/')}`);
+          console.log('');
+          rl!.prompt();
           drawReplyBottomArea();
           return;
         }
         if (cmd === '/plan') {
           currentMode = 'plan';
           logger.success('Switched to PLAN mode (Manual plan approval required).');
-          if (!(rl as any).closed) rl!.prompt();
+          rl!.prompt();
           drawReplyBottomArea();
           return;
         }
         if (cmd === '/fast') {
           currentMode = 'fast';
           logger.success('Switched to FAST mode (Automatic plan approval enabled).');
-          if (!(rl as any).closed) rl!.prompt();
+          rl!.prompt();
           drawReplyBottomArea();
           return;
         }
@@ -725,7 +818,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
         if (tempRl) {
           tempRl.close();
           if (process.stdin.isTTY) {
-            try { process.stdin.setRawMode(false); } catch (e) {}
+            try { try { process.stdin.setRawMode(false); } catch (e) {} } catch (e) {}
           }
         } else {
           if (oldLineHandler) {
@@ -756,6 +849,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
         resolve(substitutedLine);
       }
     };
+    lineHandlerRef = lineHandler;
 
     rl!.on('line', lineHandler);
   });
@@ -776,9 +870,23 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
   ];
 
   let taskCancelled = false;
+  let taskUntracked = false;
+  
+  const performUntrack = () => {
+    if (spinner && spinner.isSpinning) spinner.stop();
+    clearInterval(verbInterval);
+    logger.info('Untracking session locally (it will continue running in the cloud)...');
+    if (shellState.trackedSessionId === sessionId) {
+      shellState.trackedSessionId = null;
+      shellState.trackedSessionUrl = null;
+      saveSettings({ trackedSessionId: null, trackedSessionUrl: null });
+    }
+    completed = true;
+  };
   const sessionKeypressHandler = (char: any, key: any) => {
     const isEscape = (key && key.name === 'escape') || char === '\u001b' || char === '\x1b';
     const isCtrlC = (key && key.ctrl && key.name === 'c') || char === '\u0003';
+    const isEnd = key && key.name === 'end';
     
     if (isEscape || isCtrlC) {
       taskCancelled = true;
@@ -786,6 +894,14 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
       if (spinner && spinner.isSpinning) {
         spinner.stop();
         spinner.text = chalk.yellow('⚠ Cancelling task...');
+        spinner.start();
+      }
+    } else if (isEnd) {
+      taskUntracked = true;
+      // Immediate feedback
+      if (spinner && spinner.isSpinning) {
+        spinner.stop();
+        spinner.text = chalk.yellow('⚠ Untracking session...');
         spinner.start();
       }
     }
@@ -798,10 +914,28 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
   console.log(chalk.cyan('🌐 Session URL : ') + chalk.yellow(sessionUrl));
   console.log(chalk.dim('──────────────────────────────────────────\n'));
 
+  // Synchronize local workspace with remote branch before starting live tracking
+  try {
+    const status = await getSessionStatus(sessionId);
+    let headBranch: string | undefined;
+    if (status.outputs && Array.isArray(status.outputs)) {
+      for (const out of status.outputs) {
+        if (out.pullRequest?.headRef) {
+          headBranch = out.pullRequest.headRef;
+        }
+      }
+    }
+    await syncBranchAndPull(headBranch);
+  } catch (e) {
+    // Ignore sync errors, proceed to tracking loop
+  }
+
   readline.emitKeypressEvents(process.stdin);
   const wasRaw = process.stdin.isRaw;
   if (process.stdin.isTTY) {
-    try { process.stdin.setRawMode(true); } catch (e) {}
+    try {
+      try { process.stdin.setRawMode(true); } catch (e) {}
+    } catch (e) {}
   }
   process.stdin.resume(); // Ensure stream is flowing
   process.stdin.prependListener('keypress', sessionKeypressHandler);
@@ -815,7 +949,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
 
   const formatSpinnerText = (verb: string, state: string = 'WORKING') => {
     const s = state.toUpperCase();
-    if (['IDLE', 'WAITING', 'COMPLETED'].includes(s)) {
+    if (['IDLE', 'WAITING', 'COMPLETED', 'STOPPED', 'INACTIVE'].includes(s)) {
       return chalk.bold.yellow('⏸ Jules is idle');
     } else if (['ERROR', 'FAILED'].includes(s)) {
       return chalk.bold.red('❌ Error occurred');
@@ -824,6 +958,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
     }
   };
 
+  let consecutiveIdleCount = 0;
   const activityLog: { step: string, timestamp: string, status: 'active' | 'done' }[] = [];
   const updateActivityTracker = (newStep: string) => {
     if (!newStep || isJunkDescription(newStep)) return;
@@ -853,60 +988,24 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
     color: 'yellow'
   }).start();
 
-  // Verb rotator interval — only rotates random verbs when no real Jules
-  // step has set currentVerb. Once live status sync sets currentVerb to a
-  // real step name, stop rotating and just keep refreshing that text.
+  // Verb rotator interval
   const verbInterval = setInterval(() => {
     if (spinner.isSpinning) {
       const isStillRandom = (spinnerVerbs as readonly string[]).includes(currentVerb);
       if (isStillRandom && !lastStatusDescription) {
-        // No real status yet — keep rotating random verbs
         currentVerb = spinnerVerbs[Math.floor(Math.random() * spinnerVerbs.length)];
         updateActivityTracker(currentVerb);
       }
-      // Otherwise keep currentVerb as-is (real Jules step name)
       spinner.text = formatSpinnerText(currentVerb, currentState);
     }
   }, 2000);
 
   let completed = false;
-  let idlePollCount = 0;
   const seenActivities = new Set<string>();
   const repliedActivities = new Set<string>();
   const approvedPlans = new Set<string>();
   const downloadedMedia = new Set<string>();
   const printedAgentMessages = new Set<string>();
-
-  // Initialize tracking state with existing activities to avoid blocking on old history
-  try {
-    const initialActivities = await getSessionActivities(sessionId);
-    for (const act of initialActivities) {
-      if (act.id) printedAgentMessages.add(act.id);
-      if (act.name) printedAgentMessages.add(act.name);
-      
-      if (act.planGenerated) {
-        const isAlreadyApproved = initialActivities.some((a: any) => 
-          a.progressUpdated || 
-          a.description?.toLowerCase().includes('step') || 
-          a.planApproved
-        );
-        if (isAlreadyApproved) {
-          if (act.name) approvedPlans.add(act.name);
-          if (act.id) approvedPlans.add(act.id);
-        }
-      }
-
-      if (act.agentMessaged) {
-        if (act.id) repliedActivities.add(act.id);
-        if (act.name) repliedActivities.add(act.name);
-      }
-
-      if (act.name) seenActivities.add(act.name);
-      if (act.id) seenActivities.add(act.id);
-    }
-  } catch (e) {
-    // Initial fetch failed, main loop will retry
-  }
 
   let isOffline = false;
   let lastStatusDescription = '';
@@ -948,27 +1047,45 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
         completed = true;
         break;
       }
+      if (taskUntracked) {
+        performUntrack();
+        break;
+      }
 
       try {
         const status = await getSessionStatus(sessionId);
-        currentState = status.state || 'WORKING';
-        
-        if (['IDLE', 'WAITING', 'COMPLETED'].includes(currentState.toUpperCase())) {
-          idlePollCount++;
-        } else {
-          idlePollCount = 0;
+        currentState = (status.state || status.status || 'UNKNOWN').toUpperCase();
+
+        const isIdle = ['IDLE', 'COMPLETED', 'STOPPED', 'WAITING', 'INACTIVE'].includes(currentState);
+        const isWorking = ['IN_PROGRESS', 'WORKING', 'ANALYZING', 'RUNNING'].includes(currentState);
+        const isError = ['FAILED', 'ERROR'].includes(currentState);
+
+        if (status.description && !isJunkDescription(status.description)) {
+          currentVerb = status.description;
         }
 
-        if (idlePollCount >= 2) {
+        spinner.text = formatSpinnerText(currentVerb, currentState);
+
+        if (isError) {
           if (spinner.isSpinning) spinner.stop();
           clearInterval(verbInterval);
-          console.log(chalk.yellow('\n⏸ Jules is idle. Waiting for your next instruction.'));
+          logger.error('❌ Error occurred');
           completed = true;
           break;
         }
-        
-        // Update spinner text immediately
-        spinner.text = formatSpinnerText(currentVerb, currentState);
+
+        if (isIdle && currentState !== 'COMPLETED') {
+          consecutiveIdleCount++;
+          if (consecutiveIdleCount >= 2) {
+            if (spinner.isSpinning) spinner.stop();
+            clearInterval(verbInterval);
+            console.log(chalk.yellow('\n⏸ Jules is idle. Waiting for your next instruction.'));
+            completed = true;
+            break;
+          }
+        } else {
+          consecutiveIdleCount = 0;
+        }
 
         // --- Bug 3: Detect Interrupt/Question ---
         const isInterrupt = status.requires_user_input === true || 
@@ -976,26 +1093,9 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
 
         if (isInterrupt) {
           if (spinner.isSpinning) spinner.stop();
-
-          let interruptMsg = status.question_text || status.prompt_message || status.description || 'Jules is waiting for your input';
-          
-          // Try to get a better message from activities
-          try {
-            const interruptActivities = await getSessionActivities(sessionId);
-            const lastAgentMsg = interruptActivities.reverse().find((a: any) => a.agentMessaged?.agentMessage);
-            if (lastAgentMsg) {
-              interruptMsg = lastAgentMsg.agentMessaged.agentMessage;
-              // Mark it as printed so it doesn't duplicate if we fall through
-              if (lastAgentMsg.id) printedAgentMessages.add(lastAgentMsg.id);
-              if (lastAgentMsg.name) printedAgentMessages.add(lastAgentMsg.name);
-            }
-          } catch (e) {}
-
           console.log('\n' + chalk.bold.white('── Jules needs your input ──────────'));
-          const cols = process.stdout.columns || 80;
-          const wrapWidth = Math.max(20, cols - 10);
-          const wrappedMsg = wrapText(interruptMsg, wrapWidth, '          ');
-          console.log(chalk.yellow(`⚠ ${wrappedMsg}`));
+          const promptMsg = status.question_text || status.prompt_message || status.description || 'Jules is waiting for your input';
+          console.log(chalk.yellow(`⚠ ${promptMsg}`));
 
           if (status.options && Array.isArray(status.options)) {
             console.log('\nOptions:');
@@ -1007,19 +1107,23 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
 
           process.stdin.removeListener('keypress', sessionKeypressHandler);
           if (process.stdin.isTTY) {
-            try { process.stdin.setRawMode(wasRaw); } catch (e) {}
+            try { try { process.stdin.setRawMode(wasRaw); } catch (e) {} } catch (e) {}
           }
 
-          const userReply = await promptJulesReply('Your response (or type /exit):', sessionId);
+          const userReply = await promptJulesReply('Your response (or type /exit):');
 
           if (process.stdin.isTTY) {
-            try { process.stdin.setRawMode(true); } catch (e) {}
+            try { try { process.stdin.setRawMode(true); } catch (e) {} } catch (e) {}
           }
           process.stdin.resume();
           process.stdin.prependListener('keypress', sessionKeypressHandler);
 
           if (userReply.trim().toLowerCase() === '/exit') {
             completed = true;
+            break;
+          }
+          if (userReply.trim().toLowerCase() === '/untrack') {
+            performUntrack();
             break;
           }
 
@@ -1037,7 +1141,6 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
 
         if (status.description && status.description !== lastStatusDescription) {
           lastStatusDescription = status.description;
-          currentVerb = status.description;
           if (spinner.isSpinning) spinner.stop();
           logger.info(status.description);
           spinner.start(formatSpinnerText(currentVerb, currentState));
@@ -1054,11 +1157,15 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           completed = true;
           break;
         }
+        if (taskUntracked) {
+          performUntrack();
+          break;
+        }
 
         if (isOffline) {
           isOffline = false;
           logger.success('Back online! Resuming sync...');
-          spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
+          spinner.start(formatSpinnerText(currentVerb, currentState));
         }
 
         let activities: any[] = [];
@@ -1066,45 +1173,20 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           activities = await getSessionActivities(sessionId);
           if (!initialized) {
             const isWaitingForInput = status.requires_user_input === true || 
-                                      ['inactive', 'question', 'interrupt', 'user_input_required', 'awaiting_user_feedback'].includes(status.state?.toLowerCase() || status.type?.toLowerCase() || '');
+                                      ['inactive', 'question', 'interrupt', 'user_input_required'].includes(status.state?.toLowerCase() || status.type?.toLowerCase() || '');
             
             const agentMsgs = activities.filter((a: any) => a.agentMessaged?.agentMessage);
-            
-            // Mark older messages as replied
-            for (let i = 0; i < agentMsgs.length - 1; i++) {
-              const msg = agentMsgs[i];
-              if (msg.id) {
-                printedAgentMessages.add(msg.id);
-                repliedActivities.add(msg.id);
-              }
-              if (msg.name) {
-                printedAgentMessages.add(msg.name);
-                repliedActivities.add(msg.name);
-              }
-            }
-
-            // Handle the VERY last message specially
-            const lastAgentMsg = agentMsgs[agentMsgs.length - 1];
-            if (lastAgentMsg) {
-              if (!isWaitingForInput) {
-                // If Jules isn't waiting, just mark it as seen/replied but maybe print it for context
-                if (lastAgentMsg.id) {
-                  printedAgentMessages.add(lastAgentMsg.id);
-                  repliedActivities.add(lastAgentMsg.id);
+            for (const msg of agentMsgs) {
+              const isLast = msg === agentMsgs[agentMsgs.length - 1];
+              if (!isLast || !isWaitingForInput) {
+                if (msg.id) {
+                  printedAgentMessages.add(msg.id);
+                  repliedActivities.add(msg.id);
                 }
-                if (lastAgentMsg.name) {
-                  printedAgentMessages.add(lastAgentMsg.name);
-                  repliedActivities.add(lastAgentMsg.name);
+                if (msg.name) {
+                  printedAgentMessages.add(msg.name);
+                  repliedActivities.add(msg.name);
                 }
-                
-                const cols = process.stdout.columns || 80;
-                const wrapWidth = Math.max(20, cols - 10);
-                const wrappedMsg = wrapText(lastAgentMsg.agentMessaged.agentMessage, wrapWidth, '          ');
-                console.log('\n' + chalk.bold.white('💬 Jules (Last Message): ') + chalk.dim(wrappedMsg));
-              } else {
-                // Jules IS waiting for input. 
-                // Do NOT mark it as replied. Do NOT mark it as printed yet.
-                // The loop below will find it and prompt the user.
               }
             }
 
@@ -1113,8 +1195,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
             if (latestPlanAct) {
               console.log(chalk.bold.white('\n📋 Current Plan:'));
               latestPlanAct.planGenerated.plan.steps.forEach((s: any) => {
-                const stepTitle = s.title || s.description || 'Step';
-                console.log(`  ${chalk.cyan('◇')} ${chalk.bold.white(stepTitle)}`);
+                console.log(`  ${chalk.cyan('◇')} ${chalk.bold.white(s.title || s.description)}`);
               });
               approvedPlans.add(latestPlanAct.name);
               if (latestPlanAct.id) approvedPlans.add(latestPlanAct.id);
@@ -1145,6 +1226,10 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           completed = true;
           break;
         }
+        if (taskUntracked) {
+          performUntrack();
+          break;
+        }
 
         // Check if there are any unreplied agent messages
         const unrepliedActivity = activities.find((a: any) => 
@@ -1155,32 +1240,36 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
         if (unrepliedActivity) {
           if (spinner.isSpinning) spinner.stop();
           
-          if (!printedAgentMessages.has(unrepliedActivity.id) && !printedAgentMessages.has(unrepliedActivity.name)) {
-            if (unrepliedActivity.id) printedAgentMessages.add(unrepliedActivity.id);
-            if (unrepliedActivity.name) printedAgentMessages.add(unrepliedActivity.name);
+          const msgId = unrepliedActivity.id || unrepliedActivity.name;
+          if (msgId && !printedAgentMessages.has(msgId)) {
+            printedAgentMessages.add(msgId);
             console.log('\n');
             const cols = process.stdout.columns || 80;
             const wrapWidth = Math.max(20, cols - 10);
             const wrappedMsg = wrapText(unrepliedActivity.agentMessaged.agentMessage, wrapWidth, '          ');
-            console.log(chalk.bold.white('💬 Jules: ') + chalk.white(wrappedMsg));
+            console.log('\n' + chalk.bold.white('🤖 Jules: ') + chalk.white(wrappedMsg) + '\n');
           }
           
           // Remove our session cancel keypress listener while user is replying
           process.stdin.removeListener('keypress', sessionKeypressHandler);
           if (process.stdin.isTTY) {
-            try { process.stdin.setRawMode(wasRaw); } catch (e) {}
+            try { try { process.stdin.setRawMode(wasRaw); } catch (e) {} } catch (e) {}
           }
 
-          const userReply = await promptJulesReply('Reply (or type /exit):');
+          const userReply = await promptJulesReply('Reply (or type /exit):', sessionId);
 
           if (process.stdin.isTTY) {
-            try { process.stdin.setRawMode(true); } catch (e) {}
+            try { try { process.stdin.setRawMode(true); } catch (e) {} } catch (e) {}
           }
           process.stdin.resume();
           process.stdin.prependListener('keypress', sessionKeypressHandler);
 
           if (userReply.trim().toLowerCase() === '/exit') {
             completed = true;
+            break;
+          }
+          if (userReply.trim().toLowerCase() === '/untrack') {
+            performUntrack();
             break;
           }
 
@@ -1194,7 +1283,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
 
           if (unrepliedActivity.id) repliedActivities.add(unrepliedActivity.id);
           if (unrepliedActivity.name) repliedActivities.add(unrepliedActivity.name);
-          spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
+          spinner.start(formatSpinnerText(currentVerb, currentState));
           continue; // Poll again immediately
         }
 
@@ -1207,7 +1296,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
               fs.mkdirSync(testDir, { recursive: true });
               if (spinner.isSpinning) spinner.stop();
               logger.info('Detected "Test Project" command. Created "Test" folder for media.');
-              spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
+              spinner.start(formatSpinnerText(currentVerb, currentState));
             }
 
             // 1. Scan agentMessage for Markdown media links
@@ -1228,7 +1317,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
                       downloadedMedia.add(url);
                       if (spinner.isSpinning) spinner.stop();
                       logger.info(`Downloading media: ${url}`);
-                      spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
+                      spinner.start(formatSpinnerText(currentVerb, currentState));
                       downloadFile(url, dest).catch(e => logger.warn(`Failed to save media: ${e.message}`));
                     }
                   } catch (e) {}
@@ -1251,7 +1340,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
                       downloadedMedia.add(url);
                       if (spinner.isSpinning) spinner.stop();
                       logger.info(`Downloading artifact media: ${url}`);
-                      spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
+                      spinner.start(formatSpinnerText(currentVerb, currentState));
                       downloadFile(url, dest).catch(e => logger.warn(`Failed to save artifact media: ${e.message}`));
                     }
                   } catch (e) {}
@@ -1290,13 +1379,13 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
                   // Temporarily remove keypress cancel listener during prompt
                   process.stdin.removeListener('keypress', sessionKeypressHandler);
                   if (process.stdin.isTTY) {
-                    try { process.stdin.setRawMode(wasRaw); } catch (e) {}
+                    try { try { process.stdin.setRawMode(wasRaw); } catch (e) {} } catch (e) {}
                   }
                   
                   const approve = await askUser(chalk.bold.white('Approve plan? (y/n): '));
 
                   if (process.stdin.isTTY) {
-                    try { process.stdin.setRawMode(true); } catch (e) {}
+                    try { try { process.stdin.setRawMode(true); } catch (e) {} } catch (e) {}
                   }
                   process.stdin.resume();
                   process.stdin.prependListener('keypress', sessionKeypressHandler);
@@ -1323,25 +1412,24 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
                 }
               }
               
-              spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
+              spinner.start(formatSpinnerText(currentVerb, currentState));
             }
 
             // Print agent messages in the activities feed too, if not already handled
-            if (activity.agentMessaged?.agentMessage && !printedAgentMessages.has(activity.id) && !printedAgentMessages.has(activity.name)) {
+            if (activity.agentMessaged?.agentMessage && !printedAgentMessages.has(activity.id)) {
               if (spinner.isSpinning) spinner.stop();
               const cols = process.stdout.columns || 80;
               const wrapWidth = Math.max(20, cols - 10);
               const wrappedMsg = wrapText(activity.agentMessaged.agentMessage, wrapWidth, '          ');
-              console.log('\n' + chalk.bold.white('💬 Jules: ') + chalk.white(wrappedMsg));
-              if (activity.id) printedAgentMessages.add(activity.id);
-              if (activity.name) printedAgentMessages.add(activity.name);
-              spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
+              console.log('\n' + chalk.bold.white('🤖 Jules: ') + chalk.white(wrappedMsg) + '\n');
+              printedAgentMessages.add(activity.id);
+              spinner.start(formatSpinnerText(currentVerb, currentState));
             }
 
             if (activity.planApproved) {
               if (spinner.isSpinning) spinner.stop();
               logger.success('Plan approved 🎉');
-              spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
+              spinner.start(formatSpinnerText(currentVerb, currentState));
             }
 
             // Detect step progress & print tool use
@@ -1351,7 +1439,6 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
               const text = title + (title && description ? ': ' : '') + description;
               if (spinner.isSpinning) spinner.stop();
               printToolUse(text);
-              currentVerb = text;
               spinner.start(formatSpinnerText(currentVerb, currentState));
             }
             
@@ -1364,7 +1451,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           clearInterval(verbInterval);
           console.log('');
           logger.success('Task Completed!');
-          
+
           try {
             const finalSession = await getSessionStatus(sessionId);
             const outRepo = finalSession.outputRepo || finalSession.executionStatus?.outputRepo;
@@ -1387,8 +1474,8 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           } catch (e) {
             console.log(chalk.yellow('  ⚠ Output repo info not available via API.'));
           }
-          
-          const finalActivity = activities.find((a: any) => 
+
+          const finalActivity = activities.find((a: any) =>
             a.artifacts?.some((art: any) => art.changeSet || art.codeChanges)
           );
 
@@ -1445,38 +1532,6 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
             saveSettings({ trackedSessionId: null, trackedSessionUrl: null });
           }
           completed = true;
-        } else if (status.state?.toUpperCase() === 'INACTIVE') {
-          if (spinner.isSpinning) spinner.stop();
-          console.log('\n' + chalk.bold.yellow('⏸ Session is inactive - chat to resume'));
-          
-          process.stdin.removeListener('keypress', sessionKeypressHandler);
-          if (process.stdin.isTTY) {
-            try { process.stdin.setRawMode(wasRaw); } catch (e) {}
-          }
-
-          const userReply = await promptJulesReply('Chat to resume (or type /exit):');
-
-          if (process.stdin.isTTY) {
-            try { process.stdin.setRawMode(true); } catch (e) {}
-          }
-          process.stdin.resume();
-          process.stdin.prependListener('keypress', sessionKeypressHandler);
-
-          if (userReply.trim().toLowerCase() === '/exit') {
-            completed = true;
-            break;
-          }
-
-          const msgSpinner = ora({ text: chalk.dim('Sending message to resume…'), spinner: 'dots', color: 'white' }).start();
-          const bridgedReply = bridgePathsInText(userReply);
-          await syncLocalChanges();
-          
-          await sendJulesMessage(sessionId, bridgedReply);
-          msgSpinner.stop();
-          logger.success('Message sent successfully. Resuming session...');
-          
-          spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
-          continue; // Poll again immediately
         } else {
           await new Promise(resolve => setTimeout(resolve, 2000));
         }
@@ -1498,31 +1553,35 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
         }
 
         if (spinner.isSpinning) spinner.stop();
+        logger.error(`Polling error: ${pollError.message}`);
+        if (pollError.response?.data) {
+          console.error(chalk.red('API Error Details:'));
+          console.error(JSON.stringify(pollError.response.data, null, 2));
+        }
         if (pollError.response?.status === 404) {
            clearInterval(verbInterval);
+           logger.error('⚠ Session not found or has ended. [404]');
            if (repoUrl) {
-             logger.error(`Jules could not find the repository/session.`);
              logger.info(`Ensure that the Google Jules GitHub App is installed and has access to your repository:`);
              logger.info(`  ${sanitizeUrlForDisplay(repoUrl)}`);
-           } else {
-             logger.error('Session not found (404). Stopping.');
            }
+           completed = true;
            throw pollError; 
         }
-        logger.error(`Polling error: ${pollError.message}`);
-        spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
+        spinner.start(formatSpinnerText(currentVerb, currentState));
         await new Promise(resolve => setTimeout(resolve, 2000));
       }
     }
   } finally {
     process.stdin.removeListener('keypress', sessionKeypressHandler);
     if (process.stdin.isTTY) {
-      try { process.stdin.setRawMode(wasRaw); } catch (e) {}
+      try { try { process.stdin.setRawMode(wasRaw); } catch (e) {} } catch (e) {}
     }
   }
 }
 
 async function handleEdit(instruction: string) {
+  logger.info(`Processing instruction: "${instruction}"...`);
   await enforceWorkspace();
   validateEnv();
   let repoUrl = '';
@@ -1785,10 +1844,14 @@ async function handleDocs() {
   console.log(chalk.white('   Your sessions and shadow repositories are stored in the cloud.'));
   console.log(chalk.white('   Access them anytime at https://jules.google.com'));
 
-  console.log(`\n${chalk.bold.cyan('8. CONTACT & COMMUNITY')}`);
-  console.log(chalk.white('   • Developer : https://t.me/R3V_X'));
-  console.log(chalk.white('   • Community : https://t.me/allinformation0173'));
-  console.log(chalk.white('   • Instagram : https://www.instagram.com/opeditzxx/'));
+  console.log(`\n${chalk.bold.cyan('8. PROJECT INFORMATION')}`);
+  console.log(chalk.white('   • Open Source : Jules CLI is an Open Source project'));
+  console.log(chalk.white('   • GitHub      : https://github.com/v54087912-collab/Jules-CLI.git'));
+  
+  console.log(`\n${chalk.bold.cyan('9. CONTACT & COMMUNITY')}`);
+  console.log(chalk.white('   • Developer   : https://t.me/R3V_X'));
+  console.log(chalk.white('   • Community   : https://t.me/allinformation0173'));
+  console.log(chalk.white('   • Instagram   : https://www.instagram.com/opeditzxx/'));
 
   console.log('\n' + chalk.dim('─'.repeat(60)));
   console.log(chalk.italic.dim('   Happy Coding with Jules!'));
@@ -1844,6 +1907,11 @@ async function handleShortcutsCommand() {
     { keys: '!foo',         desc: 'Expand to last command starting with "foo"' },
     { keys: '^old^new',     desc: 'Replace "old" with "new" in last command and run' },
     { keys: ':p',           desc: 'Preview command expansion without running (e.g., !!:p)' },
+  ]);
+
+  printGroup('Active Session Control', [
+    { keys: 'ESC / Ctrl + C', desc: 'Cancel and delete the active cloud task' },
+    { keys: 'End',            desc: 'Untrack/stop monitoring session locally (continues in cloud)' },
   ]);
 
   printGroup('Control & Terminal', [
@@ -2064,28 +2132,64 @@ function expandHistory(line: string, history: string[]): { expanded: string; cha
 async function startShell() {
   let projectName = await enforceWorkspace();
   await ensureGitAndRemoteLinked();
-  const branch = await getCurrentBranch() || 'main';
+  
+  const branch = await getCurrentBranch();
   const shadowUrl = await getRemoteUrl();
-  await printBanner(projectName, branch, currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
 
-  console.log(chalk.bold.white('  Tips for getting started:'));
-  console.log(chalk.white('  1. Run ') + chalk.bold.cyan('/init') + chalk.white(' to link this directory to a shadow repository'));
-  console.log(chalk.white('  2. Type your coding instruction and press ') + chalk.bold('Enter') + chalk.white(' to edit files\n'));
+  const settings = loadSettings();
+  if (settings.trackedSessionId) {
+    shellState.trackedSessionId = settings.trackedSessionId;
+  }
+  if (settings.trackedSessionUrl) {
+    shellState.trackedSessionUrl = settings.trackedSessionUrl;
+    // Fallback: If we have URL but no ID (or it's set to "(none)"), extract ID from URL
+    if (!shellState.trackedSessionId || shellState.trackedSessionId === '(none)') {
+      const match = settings.trackedSessionUrl.match(/\/session(?:s)?\/([a-zA-Z0-9_-]+)/);
+      if (match) {
+        shellState.trackedSessionId = match[1];
+        saveSettings({ trackedSessionId: match[1] });
+      }
+    }
+  }
+
+  await printBanner(
+    projectName, 
+    branch, 
+    currentMode, 
+    shadowUrl, 
+    shellState.trackedSessionId, 
+    shellState.trackedSessionUrl
+  );
 
   const commandsList = ['/init', '/repo', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/help', '/docs', '/shot', '/deleteworkspace', '/exit'];
 
   const PROMPT_STR = '> ';
   const PROMPT_LEN = PROMPT_STR.length;
 
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    prompt: chalk.bold.white(PROMPT_STR),
-    completer: (line: string) => {
-      // Disable default readline tab completion to avoid double-printing
-      return [[], line];
-    }
-  });
+  let rl;
+  try {
+    rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      terminal: process.stdin.isTTY,
+      prompt: chalk.bold.white(PROMPT_STR),
+      completer: (line: string) => {
+        // Disable default readline tab completion to avoid double-printing
+        return [[], line];
+      }
+    });
+  } catch (e) {
+    rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      terminal: false,
+      prompt: chalk.bold.white(PROMPT_STR),
+      completer: (line: string) => {
+        // Disable default readline tab completion to avoid double-printing
+        return [[], line];
+      }
+    });
+  }
   
   shellState.activeRl = rl;
 
@@ -2131,19 +2235,25 @@ async function startShell() {
     return true;
   };
 
+  let lastDrawnFooterText = '';
+
   const clearBottomArea = () => {
     if (activeBottomLines === 0) return;
     const currentPrompt = (rl as any)._prompt || '';
     const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
-    const actualPromptLen = cleanPrompt.length;
-    const col = actualPromptLen + rl.cursor;
+    const actualPromptLen = cleanPrompt.length || 0;
+    const rlCursor = typeof (rl as any).cursor === 'number' ? (rl as any).cursor : 0;
+    const col = actualPromptLen + rlCursor;
     for (let i = 0; i < activeBottomLines; i++) {
       readline.moveCursor(process.stdout, 0, 1);
       readline.clearLine(process.stdout, 0);
     }
     readline.moveCursor(process.stdout, 0, -activeBottomLines);
-    readline.cursorTo(process.stdout, col);
+    if (!isNaN(col)) {
+      readline.cursorTo(process.stdout, col);
+    }
     activeBottomLines = 0;
+    lastDrawnFooterText = ''; // Reset cache
   };
 
   const clearBottomAreaOnEnter = () => {
@@ -2157,21 +2267,19 @@ async function startShell() {
       readline.moveCursor(process.stdout, 0, -(activeBottomLines - 1));
     }
     activeBottomLines = 0;
+    lastDrawnFooterText = ''; // Reset cache
   };
 
   const drawBottomArea = (matches: string[] = []) => {
+    if (!(rl as any).terminal) return;
     const rows = process.stdout.rows || 24;
-    const cols = process.stdout.columns || 80;
-
-    // Lower threshold for mobile/small screens
-    if (rows < 8) {
+    if (rows < 5) {
       clearBottomArea();
       shellState.isBottomAreaRendered = false;
       return;
     }
-    shellState.isBottomAreaRendered = true;
-    clearBottomArea();
 
+    const cols = process.stdout.columns || 80;
     const lines: string[] = [];
     lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 1))));
 
@@ -2210,60 +2318,118 @@ async function startShell() {
 
     const left = '/shot for shortcuts';
     const right = '/session';
-    if (cols > 40) {
-      const spaceCount = Math.max(2, cols - left.length - right.length - 10);
-      const footer = chalk.dim('  ' + left + ' '.repeat(spaceCount) + right);
-      lines.push(footer);
-    } else if (cols > 20) {
-      lines.push(chalk.dim('  ' + right));
-    }
+    const spaceCount = Math.max(2, cols - left.length - right.length - 10);
+    const footer = chalk.dim('  ' + left + ' '.repeat(spaceCount) + right);
+    lines.push(footer);
 
     const fullCwd = process.cwd();
     const mode = currentMode.toUpperCase();
-    const modeStr = ` · ${mode} · `;
-    const infoPrefix = `  ⬢ jules-cli${modeStr}`;
-    const infoSuffix = ` [${cachedBranch}]`;
 
-    let statusLine = '';
-    if (cols > 60) {
-      const available = cols - infoPrefix.length - infoSuffix.length - 5;
-      let pathPart = fullCwd;
-      if (pathPart.length > available) {
-        if (available > 10) {
-          pathPart = '...' + pathPart.slice(-(available - 3));
-        } else {
-          pathPart = '...';
+    const prefix = `  ⬢ jules-cli · ${mode} · `;
+    let branchPart = cachedBranch;
+    let pathPart = fullCwd;
+
+    const maxAllowed = Math.max(20, cols - 2);
+
+    let prefixPart = prefix;
+    if (prefixPart.length > maxAllowed) {
+      prefixPart = `  ⬢ jules-cli · `;
+      if (prefixPart.length > maxAllowed) {
+        prefixPart = `  ⬢ `;
+      }
+    }
+
+    const getFullLen = (p: string, pt: string, b: string) => {
+      const bLen = b ? b.length + 3 : 0;
+      return p.length + pt.length + bLen;
+    };
+
+    if (getFullLen(prefixPart, pathPart, branchPart) > maxAllowed) {
+      if (branchPart.length > 15) {
+        const excess = getFullLen(prefixPart, pathPart, branchPart) - maxAllowed;
+        const targetLen = Math.max(12, branchPart.length - excess);
+        if (targetLen < branchPart.length) {
+          branchPart = branchPart.slice(0, targetLen) + '...';
         }
       }
-      statusLine = chalk.dim(`  ⬢ jules-cli `) + chalk.bold.cyan(modeStr) + chalk.dim(`${pathPart}${infoSuffix}`);
-    } else if (cols > 40) {
-      statusLine = chalk.dim(`  ⬢ jules-cli `) + chalk.bold.cyan(modeStr) + chalk.dim(infoSuffix);
-    } else {
-      statusLine = chalk.dim(`  ⬢ `) + chalk.bold.cyan(mode);
     }
+
+    if (getFullLen(prefixPart, pathPart, branchPart) > maxAllowed) {
+      const currentLen = getFullLen(prefixPart, pathPart, branchPart);
+      const excess = currentLen - maxAllowed;
+      const targetPathLen = pathPart.length - excess;
+      if (targetPathLen > 10) {
+        pathPart = '...' + pathPart.slice(-(targetPathLen - 3));
+      } else {
+        const parts = pathPart.split('/');
+        const lastFolder = parts[parts.length - 1] || '';
+        pathPart = '...' + (lastFolder.length > 10 ? lastFolder.slice(-7) + '...' : lastFolder);
+        
+        if (getFullLen(prefixPart, pathPart, branchPart) > maxAllowed) {
+          const secondExcess = getFullLen(prefixPart, pathPart, branchPart) - maxAllowed;
+          const secondTargetBranchLen = branchPart.length - secondExcess;
+          if (secondTargetBranchLen > 5) {
+            branchPart = branchPart.slice(0, secondTargetBranchLen - 3) + '...';
+          } else {
+            branchPart = '';
+          }
+        }
+      }
+    }
+
+    if (getFullLen(prefixPart, pathPart, branchPart) > maxAllowed) {
+      pathPart = '...';
+      branchPart = '';
+    }
+
+    let statusLine = '';
+    if (prefixPart.includes('jules-cli')) {
+      if (prefixPart.includes(mode)) {
+        statusLine = chalk.dim(`  ⬢ jules-cli `) + chalk.bold.cyan(`· ${mode} · `);
+      } else {
+        statusLine = chalk.dim(`  ⬢ jules-cli · `);
+      }
+    } else {
+      statusLine = chalk.dim(`  ⬢ `);
+    }
+    const infoSuffix = branchPart ? ` [${branchPart}]` : '';
+    statusLine += chalk.dim(`${pathPart}${infoSuffix}`);
     lines.push(statusLine);
     lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 1))));
 
+    const newFooterText = lines.join('\n');
+    if (newFooterText === lastDrawnFooterText && shellState.isBottomAreaRendered && activeBottomLines > 0) {
+      return;
+    }
+
+    shellState.isBottomAreaRendered = true;
+    clearBottomArea();
+
     const currentPrompt = (rl as any)._prompt || '';
     const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
-    const actualPromptLen = cleanPrompt.length;
-    const col = actualPromptLen + rl.cursor;
+    const actualPromptLen = cleanPrompt.length || 0;
+    const rlCursor = typeof (rl as any).cursor === 'number' ? (rl as any).cursor : 0;
+    const col = actualPromptLen + rlCursor;
     for (const line of lines) {
       process.stdout.write(`\n\r\u001b[2K${line}`);
     }
 
     activeBottomLines = lines.length;
     readline.moveCursor(process.stdout, 0, -activeBottomLines);
-    readline.cursorTo(process.stdout, col);
+    if (!isNaN(col)) {
+      readline.cursorTo(process.stdout, col);
+    }
+    lastDrawnFooterText = newFooterText;
   };
 
   const showPrompt = () => {
     if (shellState.isRestarting || (rl as any).closed) return;
-
     const cols = process.stdout.columns || 80;
     process.stdout.write('\n' + chalk.dim('─'.repeat(Math.max(0, cols - 1))) + '\n');
 
-    if (!(rl as any).closed) rl.prompt();
+    try {
+      rl.prompt();
+    } catch (e) {}
 
     activeMatches = [];
     cyclingIndex = -1;
@@ -2447,10 +2613,10 @@ async function startShell() {
     
     fs.writeFileSync(tempFile, rl.line);
     
-    if (!(rl as any).closed) rl.pause();
+    rl.pause();
     disableShellBracketedPaste();
     if (process.stdin.isTTY) {
-      try { process.stdin.setRawMode(false); } catch (e) {}
+      try { try { process.stdin.setRawMode(false); } catch (e) {} } catch (e) {}
     }
     
     const { spawn } = require('child_process');
@@ -2458,10 +2624,10 @@ async function startShell() {
     
     child.on('exit', () => {
       if (process.stdin.isTTY) {
-        try { process.stdin.setRawMode(true); } catch (e) {}
+        try { try { process.stdin.setRawMode(true); } catch (e) {} } catch (e) {}
       }
       process.stdout.write('\u001b[?2004h');
-      if (!(rl as any).closed) rl.resume();
+      rl.resume();
       
       if (fs.existsSync(tempFile)) {
         const edited = fs.readFileSync(tempFile, 'utf8').trim();
@@ -2586,12 +2752,12 @@ async function startShell() {
       if (key.ctrl && key.name === 'z') {
         disableShellBracketedPaste();
         if (process.stdin.isTTY) {
-          try { process.stdin.setRawMode(false); } catch (e) {}
+          try { try { process.stdin.setRawMode(false); } catch (e) {} } catch (e) {}
         }
         process.kill(process.pid, 'SIGTSTP');
         process.once('SIGCONT', () => {
           if (process.stdin.isTTY) {
-            try { process.stdin.setRawMode(true); } catch (e) {}
+            try { try { process.stdin.setRawMode(true); } catch (e) {} } catch (e) {}
           }
           process.stdout.write('\u001b[?2004h');
           (rl as any)._refreshLine();
@@ -2603,30 +2769,6 @@ async function startShell() {
       // Ctrl + \ (SIGQUIT)
       if (key.ctrl && key.name === 'backslash') {
         process.kill(process.pid, 'SIGQUIT');
-        return;
-      }
-
-      // Ctrl + C (SIGINT)
-      if (key.ctrl && key.name === 'c') {
-        if (rl.line || accumulatedLines.length > 0 || isPasting) {
-          accumulatedLines = [];
-          altEnterPressed = false;
-          shellPastedBlocks = [];
-          shellPasteCount = 0;
-          isPasting = false;
-          rl.setPrompt(chalk.bold.white(PROMPT_STR));
-          (rl as any).line = '';
-          (rl as any).cursor = 0;
-          (rl as any)._refreshLine();
-          activeMatches = [];
-          cyclingIndex = -1;
-          lastCyclingIndex = -1;
-          drawBottomArea([]);
-        } else {
-          clearBottomArea();
-          console.log(chalk.yellow('\nGoodbye!'));
-          process.exit(0);
-        }
         return;
       }
 
@@ -2704,33 +2846,60 @@ async function startShell() {
 
       // End + D (Delete workspace and restart)
       if (key.name === 'end' && (char === 'd' || char === 'D')) {
+        // Set restarting flag
+        shellState.isRestarting = true;
+
+        // Reset terminal state before exit/restart
+        if (shellState.octopusInterval) clearInterval(shellState.octopusInterval);
+        process.stdout.write('\u001b[r'); 
+        process.stdout.write('\u001b[H\u001b[2J');
+
         const wsRoot = getWorkspaceRoot();
+        const parentDir = path.dirname(wsRoot);
+        
+        // Move out of the workspace before deleting it to avoid ENOENT on restart
+        if (fs.existsSync(parentDir)) {
+          process.chdir(parentDir);
+        }
+
         logger.info(`\nDeleting workspace: ${wsRoot}...`);
         try {
-          const parentDir = path.dirname(wsRoot);
-          try {
-            process.chdir(fs.existsSync(parentDir) ? parentDir : require('os').homedir());
-          } catch (e) {}
-
           if (fs.existsSync(wsRoot)) {
             fs.rmSync(wsRoot, { recursive: true, force: true });
           }
-          logger.success('Workspace deleted. Restarting Jules CLI...');
-          shellState.isRestarting = true;
-          if (process.stdin.isTTY) {
-            try { process.stdin.setRawMode(false); } catch (e) {}
+          
+          // Create New Workspace
+          fs.mkdirSync(wsRoot, { recursive: true });
+          const defaultProject = path.join(wsRoot, 'default-project');
+          fs.mkdirSync(defaultProject, { recursive: true });
+          logger.success('Old Workspace deleted. New Workspace created with default-project.');
+
+          // Move into the default-project so the restarted CLI is in a valid project subdirectory
+          process.chdir(defaultProject);
+
+          logger.info('Restarting Jules CLI...');
+
+          // Close current readline to stop listening for input
+          if (shellState.activeRl) {
+            shellState.activeRl.close();
           }
-          rl.close();
+
+          // Explicitly pause stdin
+          process.stdin.pause();
+
           const { spawn } = require('child_process');
           const child = spawn(process.argv[0], process.argv.slice(1), {
             stdio: 'inherit',
-            cwd: process.cwd()
+            cwd: defaultProject,
+            env: process.env
           });
+
           child.on('exit', (code: number | null) => {
             process.exit(code || 0);
           });
         } catch (err: any) {
           logger.error(`Failed to delete workspace: ${err.message}`);
+          shellState.isRestarting = false;
         }
         return;
       }
@@ -2817,6 +2986,9 @@ async function startShell() {
 
     isCycling = false;
 
+    // Reset footer cache on every keypress to ensure it's redrawn if readline cleared it
+    lastDrawnFooterText = ''; 
+
     process.nextTick(() => {
       if (!isCycling) {
         cyclingIndex = -1;
@@ -2841,9 +3013,17 @@ async function startShell() {
 
   readline.emitKeypressEvents(process.stdin);
   if (process.stdin.isTTY) {
-    try { process.stdin.setRawMode(true); } catch (e) {}
+    try {
+      try { process.stdin.setRawMode(true); } catch (e) {}
+    } catch (e) {
+      // Ignore EIO/TTY errors
+    }
   }
   process.stdin.resume();
+
+  process.on('exit', () => {
+    process.stdout.write('\u001b[r');
+  });
 
   shellState.keypressHandler = handleKeypress;
   process.stdin.prependListener('keypress', handleKeypress);
@@ -2853,15 +3033,13 @@ async function startShell() {
   showPrompt();
 
   shellState.shellLineHandler = async (line) => {
-    if (shellState.isRestarting) return;
-
     const endsWithBackslash = line.endsWith('\\');
     if (altEnterPressed || endsWithBackslash) {
       const lineToPush = endsWithBackslash ? line.slice(0, -1) : line;
       accumulatedLines.push(lineToPush);
       altEnterPressed = false;
       rl.setPrompt('  ');
-      if (!(rl as any).closed) rl.prompt();
+      rl.prompt();
       drawBottomArea([]);
       shellState.isBottomAreaRendered = true;
       return;
@@ -2943,10 +3121,10 @@ async function startShell() {
       if (!command.startsWith('/')) {
         // Direct chat mode: treat the whole line as an instruction
         try {
-          if (!(rl as any).closed) rl.pause();
+          rl.pause();
           await handleEdit(finalInput);
         } finally {
-          if (!(rl as any).closed) rl.resume();
+          rl.resume();
           if (shellState.keypressHandler) {
             process.stdin.prependListener('keypress', shellState.keypressHandler);
           }
@@ -2959,10 +3137,13 @@ async function startShell() {
       switch (command) {
         case '/init':
           try {
-            if (!(rl as any).closed) rl.pause();
+            rl.pause();
             await handleInit();
+            const shadowUrl = await getRemoteUrl();
+            const branch = await getCurrentBranch();
+            await printBanner(projectName, branch || 'main', currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
           } finally {
-            if (!(rl as any).closed) rl.resume();
+            rl.resume();
           }
           break;
         case '/repo':
@@ -2973,32 +3154,32 @@ async function startShell() {
               return fs.statSync(fullPath).isDirectory() && !f.startsWith('.');
             });
 
-            if (!(rl as any).closed) rl.pause();
+            rl.pause();
             const spinner = ora({ text: chalk.dim('Fetching GitHub repositories...'), color: 'magenta' }).start();
             const githubRepos = await listUserRepos();
             spinner.stop();
-            if (!(rl as any).closed) rl.resume();
+            rl.resume();
 
-            console.log(chalk.bold.white('\n  Available Local Projects:'));
+            process.stdout.write(chalk.bold.white('\n  Available Local Projects:\n'));
             if (localProjects.length === 0) {
-              console.log(chalk.dim('    (No local projects found)'));
+              process.stdout.write(chalk.dim('    (No local projects found)\n'));
             } else {
               localProjects.forEach((p, i) => {
-                console.log(`    ${chalk.bold.cyan((i + 1).toString().padEnd(3))} ${chalk.white(p)}`);
+                process.stdout.write(`    ${chalk.bold.cyan((i + 1).toString().padEnd(3))} ${chalk.white(p)}\n`);
               });
             }
 
-            console.log(chalk.bold.white('\n  Your GitHub Repositories:'));
-            const displayRepos = githubRepos.slice(0, 15); // Show top 15 updated
+            process.stdout.write(chalk.bold.white('\n  Your GitHub Repositories:\n'));
+            const displayRepos = githubRepos.slice(0, 15);
             displayRepos.forEach((r: any, i: number) => {
               const num = localProjects.length + i + 1;
-              console.log(`    ${chalk.bold.cyan(num.toString().padEnd(3))} ${chalk.white(r.name)} ${chalk.dim('(' + r.full_name + ')')}`);
+              process.stdout.write(`    ${chalk.bold.cyan(num.toString().padEnd(3))} ${chalk.white(r.name)} ${chalk.dim('(' + r.full_name + ')')}\n`);
             });
-            console.log('');
+            process.stdout.write('\n');
 
-            if (!(rl as any).closed) rl.pause();
+            rl.pause();
             const choice = await askUser(chalk.hex('#2ec4b6')('Select number or type name to switch/init (Enter to cancel): '));
-            if (!(rl as any).closed) rl.resume();
+            rl.resume();
 
             if (!choice.trim()) break;
 
@@ -3015,7 +3196,6 @@ async function startShell() {
                 selectedRepoUrl = repo.clone_url.replace('https://', `https://${config.GITHUB_TOKEN}@`);
               }
             } else {
-              // Try match by name
               const localMatch = localProjects.find(p => p.toLowerCase() === choice.trim().toLowerCase());
               if (localMatch) {
                 selectedProject = localMatch;
@@ -3057,10 +3237,13 @@ async function startShell() {
           break;
         case '/sync':
           try {
-            if (!(rl as any).closed) rl.pause();
+            rl.pause();
             await handleSync();
+            const shadowUrl = await getRemoteUrl();
+            const branch = await getCurrentBranch();
+            await printBanner(projectName, branch || 'main', currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
           } finally {
-            if (!(rl as any).closed) rl.resume();
+            rl.resume();
           }
           break;
         case '/edit':
@@ -3068,27 +3251,27 @@ async function startShell() {
             logger.error('Usage: /edit [instruction]');
           } else {
             try {
-              if (!(rl as any).closed) rl.pause();
+              rl.pause();
               await handleEdit(args.join(' '));
             } finally {
-              if (!(rl as any).closed) rl.resume();
+              rl.resume();
             }
           }
           break;
         case '/restore':
           try {
-            if (!(rl as any).closed) rl.pause();
+            rl.pause();
             await handleRestore();
           } finally {
-            if (!(rl as any).closed) rl.resume();
+            rl.resume();
           }
           break;
         case '/session':
           try {
-            if (!(rl as any).closed) rl.pause();
+            rl.pause();
             await handleSessionCommand(args);
           } finally {
-            if (!(rl as any).closed) rl.resume();
+            rl.resume();
           }
           break;
         case '/plan':
@@ -3107,10 +3290,10 @@ async function startShell() {
           break;
         case '/usage':
           try {
-            if (!(rl as any).closed) rl.pause();
+            rl.pause();
             await handleUsageCommand();
           } finally {
-            if (!(rl as any).closed) rl.resume();
+            rl.resume();
           }
           break;
 
@@ -3120,40 +3303,64 @@ async function startShell() {
         case '/deleleteworkspace':
         case '/Deleleteworkspace':
           try {
+            // Set restarting flag to avoid "Goodbye!" and premature exit
+            shellState.isRestarting = true;
+
+            // Reset terminal state before exit/restart
+            if (shellState.octopusInterval) clearInterval(shellState.octopusInterval);
+            process.stdout.write('\u001b[r'); 
+            process.stdout.write('\u001b[H\u001b[2J');
+
             const wsRoot = getWorkspaceRoot();
-            logger.info(`Deleting workspace: ${wsRoot}...`);
-            
-            // Change directory out of the workspace before deleting it to avoid process.cwd() ENOENT errors
             const parentDir = path.dirname(wsRoot);
-            try {
-              process.chdir(fs.existsSync(parentDir) ? parentDir : require('os').homedir());
-            } catch (e) {}
+
+            // Move out of the workspace before deleting it to avoid ENOENT on restart
+            if (fs.existsSync(parentDir)) {
+              process.chdir(parentDir);
+            }
+
+            logger.info(`Deleting workspace: ${wsRoot}...`);
             
             // Delete workspace
             if (fs.existsSync(wsRoot)) {
               fs.rmSync(wsRoot, { recursive: true, force: true });
             }
             
-            logger.success('Workspace deleted. Restarting Jules CLI...');
+            // Create New Workspace
+            fs.mkdirSync(wsRoot, { recursive: true });
+            const defaultProject = path.join(wsRoot, 'default-project');
+            fs.mkdirSync(defaultProject, { recursive: true });
+            logger.success('Old Workspace deleted. New Workspace created with default-project.');
+            
+            // Move into the default-project so the restarted CLI is in a valid project subdirectory
+            process.chdir(defaultProject);
 
-            // Restart
-            shellState.isRestarting = true;
-            if (process.stdin.isTTY) {
-              try { process.stdin.setRawMode(false); } catch (e) {}
+            logger.info('Restarting Jules CLI...');
+            
+            // Close current readline to stop listening for input
+            if (shellState.activeRl) {
+              shellState.activeRl.close();
             }
-            rl.close(); // Stop listening to stdin so the child can have it
+            
+            // Explicitly pause stdin so the child can take over without conflict
+            process.stdin.pause();
+
+            // Spawn new process but keep parent alive to maintain terminal control
             const { spawn } = require('child_process');
             const child = spawn(process.argv[0], process.argv.slice(1), {
               stdio: 'inherit',
-              cwd: process.cwd()
+              cwd: defaultProject,
+              env: process.env
             });
+
             child.on('exit', (code: number | null) => {
               process.exit(code || 0);
             });
           } catch (err: any) {
             logger.error(`Failed to delete workspace: ${err.message}`);
+            shellState.isRestarting = false;
           }
-          return;
+          break;
 
         case '/help':
           console.log('');
@@ -3192,6 +3399,9 @@ async function startShell() {
           break;
         case '/clear':
           console.clear();
+          const shadowUrl = await getRemoteUrl();
+          const branch = await getCurrentBranch();
+          await printBanner(projectName, branch || 'main', currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
           break;
         case '/exit':
         case '/quit':
@@ -3216,11 +3426,26 @@ async function startShell() {
   
   const resizeHandler = () => {
     activeBottomLines = 0; // Force reset because terminal viewport has reflowed
-    drawBottomArea(activeMatches);
+    lastDrawnFooterText = ''; // Clear cache to force redraw
+    
+    // Redraw banner to re-establish scroll region on resize
+    const shadowUrlPromise = getRemoteUrl();
+    const branchPromise = getCurrentBranch();
+    Promise.all([shadowUrlPromise, branchPromise]).then(([sUrl, br]) => {
+      printBanner(projectName, br || 'main', currentMode, sUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
+      drawBottomArea(activeMatches);
+    }).catch(() => {
+      drawBottomArea(activeMatches);
+    });
   };
   process.stdout.on('resize', resizeHandler);
 
   rl.on('close', () => {
+    // Reset terminal scroll region and clear animation
+    if (shellState.octopusInterval) clearInterval(shellState.octopusInterval);
+    process.stdout.write('\u001b[r'); // Reset scroll region
+    process.stdout.write('\u001b[?2004l'); // Disable bracketed paste
+    
     disableShellBracketedPaste();
     process.off('exit', disableShellBracketedPaste);
     process.stdout.off('resize', resizeHandler);
@@ -3228,14 +3453,14 @@ async function startShell() {
       process.stdin.removeListener('keypress', shellState.keypressHandler);
     }
     if (process.stdin.isTTY) {
-      try { process.stdin.setRawMode(false); } catch (e) {}
+      try { try { process.stdin.setRawMode(false); } catch (e) {} } catch (e) {}
     }
     clearBottomArea();
     
-    if (!shellState.isRestarting) {
-      console.log(chalk.yellow('\nGoodbye!'));
-      process.exit(0);
-    }
+    if (shellState.isRestarting) return;
+    
+    console.log(chalk.yellow('\nGoodbye!'));
+    process.exit(0);
   });
 }
 

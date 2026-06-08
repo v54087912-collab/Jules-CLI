@@ -199,6 +199,8 @@ export async function printBanner(
   draw(0, true);
 }
 
+
+
 export const shellState = {
   activeRl: null as readline.Interface | null,
   shellLineHandler: null as ((line: string) => Promise<void>) | null,
@@ -207,6 +209,8 @@ export const shellState = {
   trackedSessionUrl: null as string | null,
   diffPending: false,
   isBottomAreaRendered: false,
+  octopusInterval: null as NodeJS.Timeout | null,
+  animationFrame: 0,
   isRestarting: false,
 };
 
@@ -230,10 +234,20 @@ export function askUser(query: string): Promise<string> {
       });
     });
   } else {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
+    let rl;
+    try {
+      rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+        terminal: process.stdin.isTTY
+      });
+    } catch (e) {
+      rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+        terminal: false
+      });
+    }
     return new Promise(resolve => {
       rl.question(query, (ans) => {
         rl.close();
