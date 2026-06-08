@@ -165,12 +165,9 @@ export async function printBanner(
       printInfo('Mode', mode.toUpperCase(), '⚡');
       
       if (shadowUrl) {
-        // Mask GitHub token: https://TOKEN@github.com -> https://*** @github.com
-        let displayUrl = shadowUrl.replace(/([^:]+:\/\/)?([^@]+)@/, '$1*** @');
-        if (displayUrl.length > 45) {
-          displayUrl = displayUrl.substring(0, 42) + '...';
-        }
-        printInfo('Shadow', displayUrl, '🔗');
+        // Remove GitHub token for display: https://TOKEN@github.com -> https://github.com
+        let displayUrl = shadowUrl.replace(/([^:]+:\/\/)?([^@]+)@/, '$1');
+        printInfo('Shadow', displayUrl, '🔗', true);
       } else {
         printInfo('Shadow', '(none)', '🔗');
       }

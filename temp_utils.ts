@@ -155,16 +155,17 @@ export async function printBanner(
   const printInfoArea = () => {
     process.stdout.write(chalk.dim('\n  ' + '─'.repeat(Math.min(cols - 4, 60))) + '\u001b[K\n');
     const printInfo = (label: string, value: string, icon: string) => {
-      process.stdout.write(`  ${icon} ${chalk.cyan(label.padEnd(11))} : ${chalk.white(value)}\u001b[K\n`);
+      const isUrl = label === 'Shadow' || label === 'Session URL';
+      const valueText = isUrl ? chalk.yellow.underline(value) : chalk.white(value);
+      process.stdout.write(`  ${icon} ${chalk.cyan(label.padEnd(11))} : ${valueText}\u001b[K\n`);
     };
     printInfo('Project', project, '📁');
     printInfo('Branch', branch, '🌿');
     printInfo('Mode', mode.toUpperCase(), '⚡');
     
     if (shadowUrl) {
-      // Mask GitHub token: https://TOKEN@github.com -> https://*** @github.com
-      let displayUrl = shadowUrl.replace(/([^:]+:\/\/)?([^@]+)@/, '$1*** @');
-      if (displayUrl.length > cols - 25) displayUrl = '...' + displayUrl.slice(-(cols - 30));
+      // Remove GitHub token for display: https://TOKEN@github.com -> https://github.com
+      let displayUrl = shadowUrl.replace(/([^:]+:\/\/)?([^@]+)@/, '$1');
       printInfo('Shadow', displayUrl, '🔗');
     } else {
       printInfo('Shadow', '(none)', '🔗');
@@ -238,8 +239,9 @@ export async function printBanner(
     printInfo('Mode', mode.toUpperCase(), '⚡');
     
     if (shadowUrl) {
-      let displayUrl = shadowUrl.replace(/([^:]+:\/\/)?([^@]+)@/, '$1*** @');
-      console.log(`  🔗 ${chalk.cyan('Shadow'.padEnd(11))} : ${chalk.white(displayUrl)}`);
+      // Remove GitHub token for display: https://TOKEN@github.com -> https://github.com
+      let displayUrl = shadowUrl.replace(/([^:]+:\/\/)?([^@]+)@/, '$1');
+      console.log(`  🔗 ${chalk.cyan('Shadow'.padEnd(11))} : ${chalk.yellow.underline(displayUrl)}`);
     } else {
       console.log(`  🔗 ${chalk.cyan('Shadow'.padEnd(11))} : ${chalk.white('(none)')}`);
     }
