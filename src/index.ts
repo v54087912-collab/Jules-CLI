@@ -360,7 +360,7 @@ async function promptJulesReply(cleanHeader: string): Promise<string> {
 
     const separator = chalk.dim('─'.repeat(Math.max(0, cols - 1)));
     const left = '/shot for shortcuts';
-    const right = '/session';
+    const right = '/exit';
     const spaceCount = Math.max(2, cols - left.length - right.length - 10);
     const footer = chalk.dim('  ' + left + ' '.repeat(spaceCount) + right);
 
@@ -576,7 +576,7 @@ async function promptJulesReply(cleanHeader: string): Promise<string> {
       const line = rl!.line;
       let newMatches: string[] = [];
       if (line.startsWith('/')) {
-        newMatches = ['/init', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/help', '/docs', '/shot', '/exit'].filter(c => c.startsWith(line));
+        newMatches = ['/usage', '/plan', '/fast', '/clear', '/help', '/docs', '/shot', '/exit'].filter(c => c.startsWith(line));
         if (newMatches.length > 0 && line === newMatches[0]) {
           newMatches = [];
         }
