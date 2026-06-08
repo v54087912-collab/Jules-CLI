@@ -97,6 +97,7 @@ The `jules > ` shell is packed with real-time features:
 - `Ctrl + U` / `Ctrl + K`: Delete to start/end of line.
 - `Alt + R`: Restore current input line.
 - `ESC`: **Stop and cancel** the active cloud task in real-time.
+- `END`: **Untrack/stop monitoring** the active session locally (continues running in the cloud).
 
 ---
 
