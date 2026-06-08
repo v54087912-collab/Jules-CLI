@@ -596,7 +596,7 @@ async function promptJulesReply(cleanHeader: string): Promise<string> {
   rl.on('SIGINT', sigintHandler);
 
   return new Promise<string>((resolve) => {
-    const lineHandler = (line: string) => {
+    const lineHandler = async (line: string) => {
       clearReplyBottomAreaOnEnter();
       
       const endsWithBackslash = line.endsWith('\\');
@@ -626,21 +626,36 @@ async function promptJulesReply(cleanHeader: string): Promise<string> {
           return;
         }
         if (cmd === '/shot') {
-          handleShortcutsCommand();
-          rl!.prompt();
-          drawReplyBottomArea();
+          try {
+            rl!.pause();
+            await handleShortcutsCommand();
+          } finally {
+            rl!.resume();
+            rl!.prompt();
+            drawReplyBottomArea();
+          }
           return;
         }
         if (cmd === '/docs') {
-          handleDocs();
-          rl!.prompt();
-          drawReplyBottomArea();
+          try {
+            rl!.pause();
+            await handleDocs();
+          } finally {
+            rl!.resume();
+            rl!.prompt();
+            drawReplyBottomArea();
+          }
           return;
         }
         if (cmd === '/usage') {
-          handleUsageCommand();
-          rl!.prompt();
-          drawReplyBottomArea();
+          try {
+            rl!.pause();
+            await handleUsageCommand();
+          } finally {
+            rl!.resume();
+            rl!.prompt();
+            drawReplyBottomArea();
+          }
           return;
         }
         if (cmd === '/help') {
