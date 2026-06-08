@@ -750,9 +750,11 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
   ];
 
   let taskCancelled = false;
+  let taskUntracked = false;
   const sessionKeypressHandler = (char: any, key: any) => {
     const isEscape = (key && key.name === 'escape') || char === '\u001b' || char === '\x1b';
     const isCtrlC = (key && key.ctrl && key.name === 'c') || char === '\u0003';
+    const isEnd = key && key.name === 'end';
     
     if (isEscape || isCtrlC) {
       taskCancelled = true;
@@ -760,6 +762,14 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
       if (spinner && spinner.isSpinning) {
         spinner.stop();
         spinner.text = chalk.yellow('⚠ Cancelling task...');
+        spinner.start();
+      }
+    } else if (isEnd) {
+      taskUntracked = true;
+      // Immediate feedback
+      if (spinner && spinner.isSpinning) {
+        spinner.stop();
+        spinner.text = chalk.yellow('⚠ Untracking session...');
         spinner.start();
       }
     }
@@ -875,6 +885,17 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
         completed = true;
         break;
       }
+      if (taskUntracked) {
+        if (spinner.isSpinning) spinner.stop();
+        clearInterval(verbInterval);
+        logger.info('Untracking session locally (it will continue running in the cloud)...');
+        if (shellState.trackedSessionId === sessionId) {
+          shellState.trackedSessionId = null;
+          saveSettings({ trackedSessionId: null });
+        }
+        completed = true;
+        break;
+      }
 
       try {
         const status = await getSessionStatus(sessionId);
@@ -945,6 +966,17 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           completed = true;
           break;
         }
+        if (taskUntracked) {
+          if (spinner.isSpinning) spinner.stop();
+          clearInterval(verbInterval);
+          logger.info('Untracking session locally (it will continue running in the cloud)...');
+          if (shellState.trackedSessionId === sessionId) {
+            shellState.trackedSessionId = null;
+            saveSettings({ trackedSessionId: null });
+          }
+          completed = true;
+          break;
+        }
 
         if (isOffline) {
           isOffline = false;
@@ -969,6 +1001,17 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
             await deleteJulesSession(sessionId);
           } catch (e) {}
           logger.info('Task cancelled.');
+          completed = true;
+          break;
+        }
+        if (taskUntracked) {
+          if (spinner.isSpinning) spinner.stop();
+          clearInterval(verbInterval);
+          logger.info('Untracking session locally (it will continue running in the cloud)...');
+          if (shellState.trackedSessionId === sessionId) {
+            shellState.trackedSessionId = null;
+            saveSettings({ trackedSessionId: null });
+          }
           completed = true;
           break;
         }
@@ -1633,6 +1676,11 @@ async function handleShortcutsCommand() {
     { keys: '!foo',         desc: 'Expand to last command starting with "foo"' },
     { keys: '^old^new',     desc: 'Replace "old" with "new" in last command and run' },
     { keys: ':p',           desc: 'Preview command expansion without running (e.g., !!:p)' },
+  ]);
+
+  printGroup('Active Session Control', [
+    { keys: 'ESC / Ctrl + C', desc: 'Cancel and delete the active cloud task' },
+    { keys: 'End',            desc: 'Untrack/stop monitoring session locally (continues in cloud)' },
   ]);
 
   printGroup('Control & Terminal', [
