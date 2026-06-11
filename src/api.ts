@@ -40,7 +40,7 @@ export async function createShadowRepo(name: string): Promise<string> {
   }
 }
 
-export async function createJulesSession(prompt: string, repoUrl: string, branch: string = 'main', model?: string) {
+export async function createJulesSession(prompt: string, repoUrl: string, branch: string = 'main', model?: string, signal?: AbortSignal) {
   // Extract owner/repo from URL and clean up any auth tokens
   const match = repoUrl.match(/github\.com[\/:](.+?)\/(.+?)(\.git)?$/);
   if (!match) throw new Error('Invalid GitHub URL');
@@ -60,7 +60,7 @@ export async function createJulesSession(prompt: string, repoUrl: string, branch
     payload.model = model;
   }
 
-  const response = await julesApi.post('/sessions', payload);
+  const response = await julesApi.post('/sessions', payload, { signal });
   return response.data;
 }
 
@@ -105,6 +105,23 @@ export async function listUserRepos() {
   } catch (error: any) {
     logger.error(`Failed to list GitHub repositories: ${error.message}`);
     return [];
+  }
+}
+
+export async function createNewRepo(name: string, description: string = ''): Promise<any> {
+  try {
+    const { data: repo } = await octokit.repos.createForAuthenticatedUser({
+      name,
+      description,
+      private: true,
+      auto_init: false,
+    });
+    return repo;
+  } catch (error: any) {
+    if (error.status === 422) {
+      throw new Error('Repo name taken. Try another.');
+    }
+    throw error;
   }
 }
 

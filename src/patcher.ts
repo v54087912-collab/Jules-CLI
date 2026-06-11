@@ -95,38 +95,5 @@ export async function applyChanges(changes: CodeChange[]): Promise<boolean> {
     }
   }
 
-  // 3. Auto-install dependencies
-  let packageJsonModified = false;
-  let requirementsModified = false;
-  for (const change of changes) {
-    if (change.path.endsWith('package.json')) {
-      packageJsonModified = true;
-    } else if (change.path.endsWith('requirements.txt')) {
-      requirementsModified = true;
-    }
-  }
-  
-  if (packageJsonModified) {
-    logger.info('Detected changes to package.json. Running npm install...');
-    try {
-      const isSharedStorage = process.cwd().startsWith('/storage/emulated') || process.cwd().startsWith('/sdcard');
-      const npmCmd = isSharedStorage ? 'npm install --no-bin-links' : 'npm install';
-      execSync(npmCmd, { stdio: 'inherit' });
-      logger.success('Dependencies installed successfully.');
-    } catch (e: any) {
-      logger.error(`Failed to install npm dependencies: ${e.message}`);
-    }
-  }
-  
-  if (requirementsModified) {
-    logger.info('Detected changes to requirements.txt. Running pip install...');
-    try {
-      execSync('pip install -r requirements.txt', { stdio: 'inherit' });
-      logger.success('Python dependencies installed successfully.');
-    } catch (e: any) {
-      logger.error(`Failed to install python dependencies: ${e.message}`);
-    }
-  }
-  
   return true;
 }

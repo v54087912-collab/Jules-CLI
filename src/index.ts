@@ -5,25 +5,461 @@ import path from 'path';
 import readline from 'readline';
 import chalk from 'chalk';
 import { parsePatch, formatPatch } from 'diff';
-import { validateEnv, logger, printBanner, askUser, shellState, closeAskUser, downloadFile, loadSettings, saveSettings, config } from './utils';
+import { validateEnv, logger, printBanner, askUser, shellState, closeAskUser, downloadFile, loadSettings, saveSettings, config, cancellableSleep } from './utils';
 import { initGit, syncLocalChanges, getRemoteUrl, setRemote, getCurrentBranch, isGitRepo, syncBranchAndPull } from './git';
-import { createShadowRepo, createJulesSession, getSessionStatus, getSessionActivities, sendJulesMessage, approveJulesPlan, listJulesSessions, deleteJulesSession, listUserRepos } from './api';
+import { createShadowRepo, createJulesSession, getSessionStatus, getSessionActivities, sendJulesMessage, approveJulesPlan, listJulesSessions, deleteJulesSession, listUserRepos, createNewRepo } from './api';
 import { applyChanges, CodeChange } from './patcher';
 import fs from 'fs';
 import { bridgePathsInText, restoreExternalMappedFiles } from './bridge';
+import { execSync } from 'child_process';
+import dotenv from 'dotenv';
+
+// Ignore SIGHUP to prevent Termux from killing the process on minimize
+process.on('SIGHUP', () => {});
+
+const SYNC_STATE_FILE = '.jules-sync-state.json';
+
+let activePollingTimer: ReturnType<typeof setInterval> | null = null;
+const activeIntervals = new Set<NodeJS.Timeout>();
+let activeSpinner: any | null = null;
+let escCancelled = false;
+let sessionAborted = false;
+let activePromptReject: (() => void) | null = null;
+
+function clearAllIntervals() {
+  for (const timer of activeIntervals) {
+    clearInterval(timer);
+  }
+  activeIntervals.clear();
+  if (activeSpinner) {
+    if (activeSpinner.isSpinning) activeSpinner.stop();
+    activeSpinner = null;
+  }
+  activePollingTimer = null;
+  shellState.activePollTimer = null;
+}
+
+function saveSyncState(commitHash: string, sessionId: string, appliedFiles: string[], skipped: boolean = false) {
+  try {
+    const syncState = {
+      lastSyncedCommit: commitHash,
+      lastSyncedAt: new Date().toISOString(),
+      appliedFiles,
+      sessionId,
+      skipped
+    };
+    fs.writeFileSync(SYNC_STATE_FILE, JSON.stringify(syncState, null, 2));
+    if (skipped) {
+      console.log(chalk.yellow('⚠ Changes skipped. Run /sync to apply later.'));
+    } else {
+      console.log(chalk.green('✓ Files applied and sync state saved.'));
+    }
+  } catch (e: any) {
+    logger.error(`Failed to save sync state: ${e.message}`);
+  }
+}
+
+function shouldApplyChanges(sessionId: string): boolean {
+  // Read local sync state
+  let lastSyncedCommit: string | null = null;
+  let lastSyncedAt: string | null = null;
+  let lastSessionId: string | null = null;
+  try {
+    if (fs.existsSync(SYNC_STATE_FILE)) {
+      const state = JSON.parse(fs.readFileSync(SYNC_STATE_FILE, 'utf8'));
+      lastSyncedCommit = state.lastSyncedCommit;
+      lastSyncedAt = state.lastSyncedAt;
+      lastSessionId = state.sessionId;
+    } else {
+      // No sync state file = first time = apply changes
+      return true;
+    }
+  } catch {
+    return true;
+  }
+
+  // Get current remote commit
+  try {
+    const branch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    // Fetch latest to ensure we see Jules' commits
+    execSync(`git fetch origin ${branch}`, { stdio: 'ignore' });
+    const remoteCommit = execSync(`git rev-parse origin/${branch}`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    
+    // Only show diff if remote has NEW commits or it's a different session
+    if (remoteCommit === lastSyncedCommit && sessionId === lastSessionId) {
+      console.log(chalk.green('✓ Local files are already up to date.'));
+      if (lastSyncedAt) {
+        console.log(chalk.gray(`  Last synced: ${lastSyncedAt}`));
+      }
+      return false; // skip diff prompt
+    }
+
+    if (remoteCommit !== lastSyncedCommit) {
+      console.log(chalk.yellow('\n📦 New changes detected from Jules session!'));
+      if (lastSyncedCommit) {
+        console.log(chalk.gray(`  Previous: ${lastSyncedCommit.slice(0, 7)}`));
+      }
+      console.log(chalk.gray(`  New:      ${remoteCommit.slice(0, 7)}`));
+      console.log('');
+    }
+  } catch (e) {
+    // If git command fails, assume we should show changes
+    return true;
+  }
+
+  return true; // new changes exist or could not verify
+}
+
+function ensureEnvFields() {
+  const envPath = path.resolve(process.cwd(), '.env');
+  if (!fs.existsSync(envPath)) return;
+
+  const envContent = fs.readFileSync(envPath, 'utf8');
+  let toAppend = '';
+
+  if (!envContent.includes('GITHUB_USER=')) {
+    toAppend += '\nGITHUB_USER=';
+  }
+  if (!envContent.includes('GITHUB_EMAIL=')) {
+    toAppend += '\nGITHUB_EMAIL=';
+  }
+
+  if (toAppend) {
+    fs.appendFileSync(envPath, toAppend);
+    console.log(chalk.yellow('⚠ New .env fields added. Please fill them:'));
+    console.log(chalk.cyan('  GITHUB_USER=your_github_username'));
+    console.log(chalk.cyan('  GITHUB_EMAIL=your@email.com'));
+    console.log(chalk.yellow('  Then restart Jules CLI.'));
+    process.exit(0);
+  }
+}
+
+function setupGitIdentity() {
+  const name = process.env.GITHUB_USER;
+  const email = process.env.GITHUB_EMAIL;
+  
+  if (!name || !email) {
+    throw new Error('GITHUB_USER or GITHUB_EMAIL missing in .env');
+  }
+
+  try {
+    execSync(`git config user.name "${name}"`);
+    execSync(`git config user.email "${email}"`);
+    console.log(chalk.gray(`  Git identity: ${name} <${email}>`));
+  } catch (err) {
+    console.log(chalk.yellow(`⚠ Could not set local git identity. Trying global...`));
+    try {
+      execSync(`git config --global user.name "${name}"`);
+      execSync(`git config --global user.email "${email}"`);
+      console.log(chalk.yellow(`⚠ Set global git identity: ${name} <${email}>`));
+    } catch (e) {}
+  }
+}
+
+function getAuthRemoteUrl(): string {
+  const token = process.env.GITHUB_TOKEN;
+  const user = process.env.GITHUB_USER;
+  const repo = process.env.SHADOW_REPO || 'jules-shadow-default-project';
+  
+  if (!token || !user) {
+    throw new Error('GITHUB_TOKEN or GITHUB_USER missing in .env');
+  }
+
+  return `https://${token}@github.com/${user}/${repo}.git`;
+}
+
+function setupAuthRemote() {
+  const url = getAuthRemoteUrl();
+  try {
+    execSync(`git remote set-url origin "${url}"`);
+  } catch {
+    try {
+      execSync(`git remote add origin "${url}"`);
+    } catch (e) {}
+  }
+  
+  const masked = url.replace(/https:\/\/([^@]+)@/, 'https://***@');
+  console.log(chalk.gray('  Remote: ' + masked));
+}
+
+function detectNewProjects(): string[] {
+  const workspacePath = getWorkspaceRoot();
+  if (!fs.existsSync(workspacePath)) return [];
+
+  const newProjects: string[] = [];
+
+  function scanDir(dir: string, depth: number = 0) {
+    if (depth > 2) return; // Limit depth to prevent infinite loops or deep scans
+
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name.startsWith('.') || entry.name.startsWith('jules-shadow-') || entry.name === 'node_modules') continue;
+
+      const fullPath = path.join(dir, entry.name);
+      const relativePath = path.relative(workspacePath, fullPath);
+      
+      const markerPath = path.join(fullPath, '.jules-repo-created');
+
+      // New project = no marker file OR no git remote
+      let hasRemote = false;
+      try {
+        if (fs.existsSync(path.join(fullPath, '.git'))) {
+          const remote = execSync('git remote -v', { cwd: fullPath, stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+          if (remote.includes('origin')) {
+            hasRemote = true;
+          }
+        }
+      } catch (e) {}
+
+      // Specifically handle default-project as a container, not a project itself
+      if (entry.name === 'default-project') {
+        scanDir(fullPath, depth + 1);
+        continue;
+      }
+
+      if (!fs.existsSync(markerPath) && !hasRemote) {
+        // Only add if it's a project (has files) and not the workspace root itself
+        const files = fs.readdirSync(fullPath).filter(f => !f.startsWith('.'));
+        if (files.length > 0) {
+          newProjects.push(relativePath);
+        }
+        
+        // If it has subdirectories but no marker/remote, maybe scan deeper too?
+        // But usually a project is a flat folder. For now, let's just add it.
+      } else if (!hasRemote) {
+        // Check if we should scan deeper for other potential project containers
+        // but only if it's not already a project
+        const subFiles = fs.readdirSync(fullPath);
+        if (!subFiles.includes('.git') && !subFiles.includes('.jules-repo-created')) {
+           scanDir(fullPath, depth + 1);
+        }
+      }
+    }
+  }
+
+  scanDir(workspacePath);
+  return [...new Set(newProjects)]; // Deduplicate
+}
+
+async function handleNewProjects(): Promise<string | null> {
+  const newProjects = detectNewProjects();
+  
+  if (newProjects.length === 0) return null;
+  
+  let createdProjectPath: string | null = null;
+  
+  for (const projectName of newProjects) {
+    console.log(chalk.yellow('\n📁 New project detected in Jules-Workspace:'));
+    console.log(chalk.white(`  Folder: ${projectName}`));
+    console.log(chalk.cyan('\nCreate a Private GitHub repo for this project?'));
+    console.log('  1. Yes — Create repo now');
+    console.log('  2. No  — Skip for now');
+    
+    const choice = await askUser('Option [1-2]: ');
+    
+    if (shellState.escCancelled) {
+      shellState.escCancelled = false;
+      console.log(chalk.gray('  Cancelled.'));
+      return null;
+    }
+    
+    if (choice.trim() === '1') {
+      createdProjectPath = await collectRepoDetailsAndCreate(projectName);
+    } else if (choice.trim() === '2') {
+      // Mark as skipped so we don't ask again
+      const workspacePath = getWorkspaceRoot();
+      const markerPath = path.join(workspacePath, projectName, '.jules-repo-created');
+      try {
+        fs.writeFileSync(
+          markerPath,
+          JSON.stringify({
+            skipped: true,
+            skippedAt: new Date().toISOString()
+          }, null, 2)
+        );
+        console.log(chalk.gray('  Skipped.'));
+      } catch (e) {}
+    }
+  }
+  return createdProjectPath;
+}
+
+async function collectRepoDetailsAndCreate(folderName: string): Promise<string | null> {
+  console.log(chalk.cyan('\n🔧 GitHub Private Repo Setup'));
+  console.log('─'.repeat(40));
+  
+  // Repo name (default = folder name)
+  const defaultName = folderName
+    .toLowerCase()
+    .replace(/\s+/g, '-');
+  
+  const repoNameInput = await askUser(`Repo name [${defaultName}]: `);
+  if (shellState.escCancelled) { shellState.escCancelled = false; return null; }
+  const repoName = repoNameInput.trim() || defaultName;
+  
+  // Repo description
+  const description = await askUser('Description (optional): ');
+  if (shellState.escCancelled) { shellState.escCancelled = false; return null; }
+  
+  // Confirm
+  console.log('');
+  console.log(chalk.cyan('📋 Confirm details:'));
+  console.log(chalk.white(`  Name        : ${repoName}`));
+  console.log(chalk.white(`  Description : ${description || '(none)'}`));
+  console.log(chalk.white(`  Visibility  : Private 🔒`));
+  console.log(chalk.white(`  Owner       : ${process.env.GITHUB_USER}`));
+  console.log('');
+  
+  const confirm = await askUser('Create this repo? (y/n): ');
+  if (shellState.escCancelled) { shellState.escCancelled = false; return null; }
+  
+  if (confirm.trim().toLowerCase() !== 'y') {
+    console.log(chalk.gray('  Cancelled.'));
+    return null;
+  }
+  
+  return await createPrivateGitHubRepo(repoName, description, folderName);
+}
+
+async function createPrivateGitHubRepo(repoName: string, description: string, folderName: string): Promise<string | null> {
+  const token = process.env.GITHUB_TOKEN;
+  const user  = process.env.GITHUB_USER;
+  
+  if (!token || !user) {
+    console.log(chalk.red('❌ GITHUB_TOKEN or GITHUB_USER missing in .env'));
+    return null;
+  }
+  
+  console.log(chalk.cyan('\n⏳ Creating private GitHub repo...'));
+  
+  try {
+    const response = await fetch('https://api.github.com/user/repos', {
+      method: 'POST',
+      headers: {
+        'Authorization': `token ${token}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'jules-cli-bot'
+      },
+      body: JSON.stringify({
+        name: repoName,
+        description: description || '',
+        private: true,
+        auto_init: false
+      })
+    });
+    
+    const data = await response.json() as any;
+    
+    if (response.ok) {
+      const repoUrl = data.html_url;
+      const authenticatedCloneUrl = data.clone_url.replace('https://', `https://${token}@`);
+      
+      console.log(chalk.green('\n✅ Private repo created successfully!'));
+      console.log('─'.repeat(40));
+      console.log(chalk.cyan('  Repo URL : ') + chalk.yellow(repoUrl));
+
+      const workspacePath = getWorkspaceRoot();
+      const projectPath = path.join(workspacePath, folderName);
+      const originalCwd = process.cwd();
+
+      // Initialize git and push
+      try {
+        process.chdir(projectPath);
+        execSync('git init', { stdio: 'ignore' });
+        
+        // Setup git identity
+        try {
+          setupGitIdentity();
+        } catch (e) {}
+
+        try {
+          execSync(`git remote add origin "${authenticatedCloneUrl}"`, { stdio: 'ignore' });
+        } catch (e) {
+          execSync(`git remote set-url origin "${authenticatedCloneUrl}"`, { stdio: 'ignore' });
+        }
+        
+        // Initial commit and push if there are files
+        execSync('git add .', { stdio: 'ignore' });
+        
+        // Add marker to .gitignore
+        const gitignorePath = path.join(projectPath, '.gitignore');
+        let gitignore = '';
+        if (fs.existsSync(gitignorePath)) {
+          gitignore = fs.readFileSync(gitignorePath, 'utf8');
+        }
+        if (!gitignore.includes('.jules-repo-created')) {
+          fs.appendFileSync(gitignorePath, '\n.jules-repo-created\n');
+        }
+
+        try {
+          execSync('git commit -m "Initial commit from Jules CLI"', { stdio: 'ignore' });
+          execSync('git branch -M main', { stdio: 'ignore' });
+          execSync('git push -u origin main', { stdio: 'ignore' });
+          console.log(chalk.green('  ✓ Local files pushed to GitHub.'));
+        } catch (e) {
+          console.log(chalk.yellow('  ⚠ No files to commit yet. Repo created empty.'));
+        }
+
+        // Create marker file
+        fs.writeFileSync(
+          path.join(projectPath, '.jules-repo-created'),
+          JSON.stringify({
+            repoName,
+            repoUrl,
+            authenticatedUrl: authenticatedCloneUrl.replace(token, '***'),
+            createdAt: new Date().toISOString(),
+            owner: user
+          }, null, 2)
+        );
+
+        console.log('\n' + chalk.bold.green('✅ Private repo created successfully!'));
+        console.log(chalk.dim('─'.repeat(40)));
+        console.log(`  Repo URL : ${chalk.yellow(repoUrl)}`);
+        console.log(`  Clone    : ${chalk.yellow(repoUrl + '.git')}`);
+        console.log(chalk.dim('─'.repeat(40)));
+
+        return projectPath;
+
+      } catch (gitErr: any) {
+        console.log(chalk.red(`  ❌ Git setup failed: ${gitErr.message}`));
+        return null;
+      } finally {
+        process.chdir(originalCwd);
+      }
+    } else {
+      console.log(chalk.red(`\n❌ GitHub API Error: ${data.message || response.statusText}`));
+      return null;
+    }
+  } catch (error: any) {
+    console.log(chalk.red(`\n❌ Error creating repository: ${error.message}`));
+    return null;
+  }
+}
 
 function handleEscapePress() {
-  if (shellState.escCancelled) return;
+  if (escCancelled || sessionAborted) return;
+  escCancelled = true;
+  sessionAborted = true;
   shellState.escCancelled = true;
+  shellState.sessionAborted = true;
 
   let cancelledAny = false;
 
-  // Cancel polling loop
-  if (shellState.activePollTimer) {
-    clearInterval(shellState.activePollTimer);
-    shellState.activePollTimer = null;
-    process.stdout.write('\n' + chalk.yellow('⚠ Session task cancelled. Returning to prompt.\n'));
+  // Cancel ALL active polling loops and spinners
+  if (activeIntervals.size > 0 || (activeSpinner && activeSpinner.isSpinning)) {
+    clearAllIntervals();
+    process.stdout.write(
+      '\n⛔ Session task cancelled.' +
+      ' Returning to prompt.\n> '
+    );
     cancelledAny = true;
+  }
+
+  if (activePromptReject) {
+    activePromptReject();
+    activePromptReject = null;
   }
 
   // Cancel active readline prompt
@@ -32,19 +468,19 @@ function handleEscapePress() {
     // We can check if it has a custom line listener (not the shell one)
     if (shellState.shellLineHandler) {
       // In shell mode, but are we in a sub-prompt?
-      // Readline doesn't tell us easily if .question is active, 
-      // but we can assume if esc is pressed we want to BREAK that sub-prompt.
       
-      // Clear current line for visual feedback
+      // If we are actually in a question, break it.
+      // We can't know for sure, but we only want to write \n if something is truly waiting for it.
+      // If a task was running (cancelledAny is true), the \n might be harmful if it hits the shell.
+      // However, if we are in promptJulesReply, cancelledAny is ALSO true (because of its poller).
+      
       (shellState.activeRl as any).line = '';
       (shellState.activeRl as any).cursor = 0;
       (shellState.activeRl as any)._refreshLine();
 
-      // If we are NOT at the main prompt (i.e. line was empty but we are still "working"), 
-      // we might need to force resolve the pending askUser.
-      // We use the escCancelled flag which askUser checks.
-      
-      // Simulate an Enter press to break the .question() if it's active
+      // ONLY write \n if we are NOT in the middle of a polling task, 
+      // OR if we know for sure we are in a sub-prompt.
+      // Since we can't be sure, we'll rely on the escCancelled flag.
       shellState.activeRl.write('\n');
       cancelledAny = true;
     } else {
@@ -58,18 +494,8 @@ function handleEscapePress() {
 
   // Abort any pending API calls
   shellState.abortController.abort();
-  shellState.abortController = new AbortController();
-
-  if (cancelledAny) {
-    // If we cancelled a sub-prompt, startShell's showPrompt will be called eventually
-    // or the command loop will continue.
-  } else {
-    // Nothing was active, just show a fresh prompt if we are in shell mode
-    if (shellState.shellLineHandler) {
-      process.stdout.write('\n' + chalk.bold.white('> '));
-      shellState.escCancelled = false;
-    }
-  }
+  // DO NOT replace shellState.abortController here. 
+  // Let showPrompt or the next command handler do it.
 }
 
 // Enable raw keypress detection
@@ -80,8 +506,9 @@ if (process.stdin.isTTY) {
   } catch (e) {}
 }
 
-process.stdin.on('keypress', (str, key) => {
-  if (key && key.name === 'escape') {
+process.stdin.on('keypress', (char, key) => {
+  const isEscape = (key && key.name === 'escape') || char === '\u001b' || char === '\x1b';
+  if (isEscape) {
     handleEscapePress();
   }
   // Standard Ctrl+C handling
@@ -176,18 +603,31 @@ const isLongPaste = (text: string): boolean => {
 function getWorkspaceStatus(): { isValid: boolean; error?: string; projectName?: string; isOutside?: boolean; wsRoot?: string } {
   const cwd = path.resolve(process.cwd());
   const wsRoot = getWorkspaceRoot();
-  
+
   if (cwd === wsRoot) {
+    const settings = loadSettings();
+    let projectName = settings.lastProject;
+
+    if (!projectName || !fs.existsSync(path.join(wsRoot, projectName))) {
+      projectName = 'default-project';
+    }
+
+    const projectPath = path.join(wsRoot, projectName);
+    if (!fs.existsSync(projectPath)) {
+      fs.mkdirSync(projectPath, { recursive: true });
+    }
+
+    process.chdir(projectPath);
     return {
-      isValid: false,
-      error: `You are in the root of Jules-Workspace (${wsRoot}).\nPlease run commands inside a project subdirectory (e.g., ${path.join(wsRoot, 'your-project')}).`,
+      isValid: true,
+      projectName,
       wsRoot
     };
   }
-  
+
   const relative = path.relative(wsRoot, cwd);
   const isSubdir = relative && !relative.startsWith('..') && !path.isAbsolute(relative);
-  
+
   if (!isSubdir) {
     return {
       isValid: false,
@@ -196,10 +636,13 @@ function getWorkspaceStatus(): { isValid: boolean; error?: string; projectName?:
       wsRoot
     };
   }
-  
+
   const parts = relative.split(path.sep);
   const projectName = parts[0];
-  
+
+  // Save as last project
+  saveSettings({ lastProject: projectName });
+
   return {
     isValid: true,
     projectName,
@@ -346,25 +789,193 @@ async function handleInit() {
   }
 }
 
+async function handleNewRepo() {
+  if (shellState.escCancelled) return;
+  validateEnv();
+  
+  const githubUser = process.env.GITHUB_USER;
+  const githubToken = process.env.GITHUB_TOKEN;
+
+  console.log(chalk.bold.white('\n  🆕 Create a New Private GitHub Repo'));
+  console.log(chalk.dim('  All values from .env — nothing hardcoded\n'));
+
+  let repoName = '';
+  while (true) {
+    const rawName = await askUser(chalk.hex('#2ec4b6')('  Repo Name: '));
+    if (shellState.escCancelled) {
+      process.stdout.write('\n' + chalk.yellow('  ⚠ Repo creation cancelled.\n'));
+      return;
+    }
+    
+    repoName = rawName.trim().replace(/\s+/g, '-');
+    if (rawName.trim() !== repoName && repoName !== '') {
+      logger.warn(`Name changed to: ${repoName}`);
+    }
+
+    if (!repoName) {
+      logger.error('Repo name cannot be empty.');
+      continue;
+    }
+
+    if (!/^[a-zA-Z0-9._-]+$/.test(repoName)) {
+      logger.error('Invalid name. letters, numbers, "-", "_" only.');
+      continue;
+    }
+
+    if (repoName.length > 100) {
+      logger.error('Name too long (max 100 chars).');
+      continue;
+    }
+    break;
+  }
+
+  const repoDesc = await askUser(chalk.hex('#2ec4b6')('  Repo Description (optional): '));
+  if (shellState.escCancelled) {
+    process.stdout.write('\n' + chalk.yellow('  ⚠ Repo creation cancelled.\n'));
+    return;
+  }
+
+  console.log(chalk.dim('  ' + '─'.repeat(40)));
+  console.log(chalk.bold.white('  📋 Confirm New Repo Details:'));
+  console.log(`    ${chalk.cyan('Name'.padEnd(12))} : ${chalk.white(repoName)}`);
+  console.log(`    ${chalk.cyan('Description'.padEnd(12))} : ${chalk.white(repoDesc || '(none)')}`);
+  console.log(`    ${chalk.cyan('Visibility'.padEnd(12))} : ${chalk.white('Private 🔒')}`);
+  console.log(`    ${chalk.cyan('Owner'.padEnd(12))} : ${chalk.white(githubUser || '(none)')}`);
+  console.log(chalk.dim('  ' + '─'.repeat(40)));
+
+  const confirm = await askUser(chalk.hex('#ff9f1c')('  Confirm? (y/n): '));
+  if (shellState.escCancelled || confirm.toLowerCase() !== 'y') {
+    process.stdout.write('\n' + chalk.yellow('  ⚠ Repo creation cancelled.\n'));
+    return;
+  }
+
+  const spinner = ora({ text: chalk.dim('⏳ Creating repo...'), color: 'magenta' }).start();
+  try {
+    const repo = await createNewRepo(repoName, repoDesc);
+    spinner.succeed('Private repo created successfully!');
+    
+    console.log(chalk.dim('  ' + '─'.repeat(40)));
+    console.log(`    ${chalk.cyan('Repo URL'.padEnd(10))} : ${chalk.yellow(repo.html_url)}`);
+    console.log(`    ${chalk.cyan('Clone'.padEnd(10))} : ${chalk.yellow(repo.clone_url)}`);
+    console.log(`    ${chalk.cyan('SSH'.padEnd(10))} : ${chalk.yellow(repo.ssh_url)}`);
+    console.log(chalk.dim('  ' + '─'.repeat(40)));
+    console.log(chalk.dim('  💡 Tip: Use /init to link this repo to Jules workspace.\n'));
+
+    // Post-creation menu
+    console.log(chalk.bold.white('  What would you like to do next?'));
+    console.log(`    ${chalk.cyan('1.')} Clone repo to Jules-Workspace`);
+    console.log(`    ${chalk.cyan('2.')} Open repo URL`);
+    console.log(`    ${chalk.cyan('3.')} Return to prompt`);
+    
+    const nextAction = await askUser(chalk.hex('#2ec4b6')('\n  Choice: '));
+    if (nextAction === '1') {
+      const wsRoot = getWorkspaceRoot();
+      const destPath = path.join(wsRoot, repoName);
+      if (fs.existsSync(destPath)) {
+        logger.error(`Destination path already exists: ${destPath}`);
+      } else {
+        const cloneSpinner = ora({ text: chalk.dim(`Cloning to ${destPath}...`), color: 'magenta' }).start();
+        try {
+          const authCloneUrl = repo.clone_url.replace('https://', `https://${githubToken}@`);
+          execSync(`git clone ${authCloneUrl} "${destPath}"`, { stdio: 'ignore' });
+          fs.writeFileSync(path.join(destPath, '.jules-repo-created'), '');
+          cloneSpinner.succeed(`Cloned to Jules-Workspace/${repoName}`);
+        } catch (cloneErr: any) {
+          cloneSpinner.fail(`Failed to clone: ${cloneErr.message}`);
+        }
+      }
+    } else if (nextAction === '2') {
+      console.log(`  🌐 Open: ${chalk.cyan(repo.html_url)}`);
+    }
+  } catch (err: any) {
+    spinner.fail(err.message);
+  }
+}
+
 async function handleSync() {
   if (shellState.escCancelled) return;
   await enforceWorkspace();
   if (shellState.escCancelled) return;
-  validateEnv();
+  
   try {
-    await ensureGitAndRemoteLinked();
-    if (shellState.escCancelled) return;
-    await syncLocalChanges();
-  } catch (error: any) {
-    if (shellState.escCancelled) {
-      process.stdout.write('\n' + chalk.yellow('⚠ Operation cancelled.\n'));
-      return;
+    // 1. Validate env first
+    validateEnv();
+    
+    // 2. Setup identity from .env
+    setupGitIdentity();
+    
+    // 3. Setup authenticated remote from .env
+    setupAuthRemote();
+    
+    // 4. Get current branch
+    let branch = 'main';
+    try {
+      branch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    } catch (e) {
+      // Empty repo, check if master exists or default to main
+      try {
+        branch = execSync('git symbolic-ref --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+      } catch (e2) {
+        branch = 'main';
+      }
     }
-    logger.error(`Sync failed: ${error.message}`);
+    
+    // 5. Set upstream if missing
+    try {
+      execSync('git rev-parse --abbrev-ref --symbolic-full-name @{u}', { stdio: 'ignore' });
+    } catch {
+      try {
+        execSync(`git branch --set-upstream-to=origin/${branch} ${branch}`, { stdio: 'ignore' });
+        console.log(chalk.yellow(`⚠ Upstream set: origin/${branch}`));
+      } catch (e) {
+        // Skip if origin branch doesn't exist yet
+      }
+    }
+    
+    // 6. Pull
+    try {
+      execSync(`git pull origin ${branch}`, { stdio: 'ignore' });
+    } catch (e) {
+      // Ignore pull errors (e.g. if remote branch doesn't exist yet)
+    }
+    
+    // 7. Stage
+    execSync('git add -A', { stdio: 'ignore' });
+    
+    // 8. Commit if changes exist
+    try {
+      execSync('git diff --cached --quiet --exit-code', { stdio: 'ignore' });
+      console.log(chalk.green('✓ Already up to date. Nothing to commit.'));
+    } catch {
+      const timestamp = new Date().toISOString();
+      execSync(`git commit -m "Jules CLI sync: ${timestamp}"`, { stdio: 'ignore' });
+      
+      try {
+        // Try push with -u if upstream might be missing
+        execSync(`git push -u origin ${branch}`, { stdio: 'ignore' });
+      } catch (e) {
+        execSync(`git push origin ${branch}`, { stdio: 'ignore' });
+      }
+      console.log(chalk.green('✓ Sync complete!'));
+    }
+
+    // Check for new projects to create repos for
+    await handleNewProjects();
+
+  } catch (err: any) {
+    console.log(chalk.red('❌ Sync failed: ' + err.message));
+    
+    // Show helpful hint if identity error
+    if (err.message.includes('identity') || err.message.includes('email')) {
+      console.log(chalk.yellow('  Fix: Set GITHUB_USER and GITHUB_EMAIL in .env'));
+      console.log(chalk.gray(`  Path: ${path.join(process.cwd(), '.env')}`));
+    }
   }
 }
 
 async function promptJulesReply(cleanHeader: string, sessionId?: string): Promise<string> {
+  sessionAborted = false;
+  const localSignal = shellState.abortController.signal;
   const oldLineHandler = shellState.shellLineHandler;
   const oldKeypressHandler = shellState.keypressHandler;
   
@@ -393,12 +1004,17 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
   }
 
   let liveStatus = '';
-  let pollingInterval: NodeJS.Timeout | null = null;
   
   if (sessionId) {
-    pollingInterval = setInterval(async () => {
+    const timer = setInterval(async () => {
+      if (escCancelled || localSignal.aborted || sessionAborted) {
+        clearInterval(timer);
+        activeIntervals.delete(timer);
+        if (activePollingTimer === timer) activePollingTimer = null;
+        return;
+      }
       try {
-        const status = await getSessionStatus(sessionId, shellState.abortController.signal);
+        const status = await getSessionStatus(sessionId, localSignal);
         const newStatus = status.description || status.state || status.status || '';
         if (newStatus && newStatus !== liveStatus) {
           liveStatus = newStatus;
@@ -406,12 +1022,14 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
         }
       } catch (e) {}
     }, 8000);
-    shellState.activePollTimer = pollingInterval;
+    activeIntervals.add(timer);
+    activePollingTimer = timer;
+    shellState.activePollTimer = activePollingTimer;
   }
 
   console.log(chalk.bold.white('\n' + cleanHeader));
   const cols = process.stdout.columns || 80;
-  console.log(chalk.dim('─'.repeat(Math.max(0, cols - 1))));
+  console.log(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
 
   let accumulatedLines: string[] = [];
   let altEnterPressed = false;
@@ -478,7 +1096,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
     clearReplyBottomArea();
 
     const cols = process.stdout.columns || 80;
-    const separator = chalk.dim('─'.repeat(Math.max(0, cols - 1)));
+    const separator = chalk.dim('─'.repeat(Math.max(0, cols - 2)));
     const left = '/shot for shortcuts';
     const right = '/session';
     
@@ -623,17 +1241,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
 
     const isEscape = (key && key.name === 'escape') || char === '\u001b' || char === '\x1b';
     if (isEscape) {
-      accumulatedLines = [];
-      altEnterPressed = false;
-      replyPastedBlocks = [];
-      replyPasteCount = 0;
-      rl!.setPrompt(chalk.bold.white('> '));
-      (rl as any).line = '';
-      (rl as any).cursor = 0;
-      (rl as any)._refreshLine();
-      activeMatches = [];
-      cyclingIndex = -1;
-      drawReplyBottomArea();
+      handleEscapePress();
       return;
     }
 
@@ -729,6 +1337,11 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
 
   return new Promise<string>((resolve) => {
     const lineHandler = (line: string) => {
+      if (shellState.escCancelled || localSignal.aborted || sessionAborted) {
+        if (activePollingTimer) clearInterval(activePollingTimer!);
+        resolve('');
+        return;
+      }
       clearReplyBottomAreaOnEnter();
       
       const endsWithBackslash = line.endsWith('\\');
@@ -752,7 +1365,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
         if (cmd === '/clear') {
           console.clear();
           console.log(chalk.bold.white('\n' + cleanHeader));
-          console.log(chalk.dim('─'.repeat(Math.max(0, cols - 1))));
+          console.log(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
           if (!(rl as any).closed) rl!.prompt();
           drawReplyBottomArea();
           return;
@@ -844,8 +1457,8 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
         replyPastedBlocks = [];
         replyPasteCount = 0;
         
-        if (pollingInterval) {
-          clearInterval(pollingInterval);
+        if (activePollingTimer) {
+          clearInterval(activePollingTimer!);
           shellState.activePollTimer = null;
         }
         resolve(substitutedLine);
@@ -854,8 +1467,8 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
 
     rl!.on('line', lineHandler);
     rl!.on('close', () => {
-      if (pollingInterval) {
-        clearInterval(pollingInterval);
+      if (activePollingTimer) {
+        clearInterval(activePollingTimer!);
         shellState.activePollTimer = null;
       }
       resolve('');
@@ -863,7 +1476,8 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
   });
 }
 
-export async function trackJulesSession(sessionId: string, repoUrl?: string) {
+export async function trackJulesSession(sessionId: string, repoUrl?: string, forceSync: boolean = false) {
+  const localSignal = shellState.abortController.signal;
   const spinnerVerbs = [
     'Pondering',
     'Crunching',
@@ -941,11 +1555,21 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
     spinner: 'dots',
     color: 'yellow'
   }).start();
+  activeSpinner = spinner;
+
+  let lastStatusDescription = '';
+  let isOffline = false;
 
   // Verb rotator interval — only rotates random verbs when no real Jules
   // step has set currentVerb. Once live status sync sets currentVerb to a
   // real step name, stop rotating and just keep refreshing that text.
-  const verbInterval = setInterval(() => {
+  const timer = setInterval(() => {
+    if (escCancelled || localSignal.aborted || sessionAborted) {
+      clearInterval(timer);
+      activeIntervals.delete(timer);
+      if (activePollingTimer === timer) activePollingTimer = null;
+      return;
+    }
     if (spinner.isSpinning) {
       const isStillRandom = (spinnerVerbs as readonly string[]).includes(currentVerb);
       if (isStillRandom && !lastStatusDescription) {
@@ -957,7 +1581,9 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
       spinner.text = formatSpinnerText(currentVerb, currentState);
     }
   }, 2000);
-  shellState.activePollTimer = verbInterval;
+  activeIntervals.add(timer);
+  activePollingTimer = timer;
+  shellState.activePollTimer = activePollingTimer;
 
   let completed = false;
   let idlePollCount = 0;
@@ -969,7 +1595,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
 
   // Initialize tracking state with existing activities to avoid blocking on old history
   try {
-    const initialActivities = await getSessionActivities(sessionId, shellState.abortController.signal);
+    const initialActivities = await getSessionActivities(sessionId, localSignal);
     for (const act of initialActivities) {
       if (act.id) printedAgentMessages.add(act.id);
       if (act.name) printedAgentMessages.add(act.name);
@@ -998,9 +1624,6 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
     // Initial fetch failed, main loop will retry
   }
 
-  let isOffline = false;
-  let lastStatusDescription = '';
-
   // Helper for printing tool executions in Claude Code style
   const printToolUse = (text: string) => {
     const clean = text.replace(/[`']/g, '');
@@ -1026,13 +1649,13 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
   let initialized = false;
 
   try {
-    while (!completed) {
-      if (shellState.escCancelled) {
+    while (!completed && !localSignal.aborted && !sessionAborted) {
+      if (shellState.escCancelled || localSignal.aborted || sessionAborted) {
         if (spinner.isSpinning) spinner.stop();
-        clearInterval(verbInterval); shellState.activePollTimer = null;
+        clearAllIntervals();
         logger.info('Aborting Jules task...');
         try {
-          await deleteJulesSession(sessionId, shellState.abortController.signal);
+          await deleteJulesSession(sessionId, localSignal);
         } catch (e) {}
         logger.info('Task cancelled.');
         completed = true;
@@ -1040,7 +1663,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
       }
 
       try {
-        const status = await getSessionStatus(sessionId, shellState.abortController.signal);
+        const status = await getSessionStatus(sessionId, localSignal);
         currentState = status.state || status.status || 'WORKING';
         
         if (['IDLE', 'WAITING', 'COMPLETED', 'STOPPED', 'INACTIVE'].includes(currentState.toUpperCase())) {
@@ -1051,9 +1674,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
 
         if (idlePollCount >= 2) {
           if (spinner.isSpinning) spinner.stop();
-          clearInterval(verbInterval); shellState.activePollTimer = null;
-          console.log(chalk.yellow('\n⏸ Jules session is idle. Send a message to continue.'));
-          
+          clearAllIntervals();
           
           if (process.stdin.isTTY) {
             try { process.stdin.setRawMode(wasRaw); } catch (e) {}
@@ -1067,7 +1688,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           process.stdin.resume();
           
 
-          if (shellState.escCancelled || userReply.trim().toLowerCase() === '/exit') {
+          if (shellState.escCancelled || userReply.trim().toLowerCase() === '/exit' || localSignal.aborted) {
             completed = true;
             break;
           }
@@ -1076,7 +1697,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           const bridgedReply = bridgePathsInText(userReply);
           await syncLocalChanges();
           
-          await sendJulesMessage(sessionId, bridgedReply, shellState.abortController.signal);
+          await sendJulesMessage(sessionId, bridgedReply, localSignal);
           msgSpinner.stop();
           logger.success('Message sent successfully. Resuming session...');
           
@@ -1099,7 +1720,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           
           // Try to get a better message from activities
           try {
-            const interruptActivities = await getSessionActivities(sessionId, shellState.abortController.signal);
+            const interruptActivities = await getSessionActivities(sessionId, localSignal);
             const lastAgentMsg = interruptActivities.reverse().find((a: any) => a.agentMessaged?.agentMessage);
             if (lastAgentMsg) {
               interruptMsg = lastAgentMsg.agentMessaged.agentMessage;
@@ -1128,6 +1749,8 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
             try { process.stdin.setRawMode(wasRaw); } catch (e) {}
           }
 
+          clearAllIntervals();
+
           const userReply = await promptJulesReply('Your response (or type /exit):', sessionId);
 
           if (process.stdin.isTTY) {
@@ -1136,14 +1759,14 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           process.stdin.resume();
           
 
-          if (shellState.escCancelled || userReply.trim().toLowerCase() === '/exit') {
+          if (shellState.escCancelled || userReply.trim().toLowerCase() === '/exit' || localSignal.aborted) {
             completed = true;
             break;
           }
 
           const msgSpinner = ora({ text: chalk.dim('Sending response…'), spinner: 'dots', color: 'white' }).start();
           const bridgedReply = bridgePathsInText(userReply);
-          await sendJulesMessage(sessionId, bridgedReply, shellState.abortController.signal);
+          await sendJulesMessage(sessionId, bridgedReply, localSignal);
           msgSpinner.stop();
           
           console.log(chalk.bold.green('🧑 You: ') + chalk.white(userReply.trim()));
@@ -1161,12 +1784,12 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           spinner.start(formatSpinnerText(currentVerb, currentState));
         }
         
-        if (shellState.escCancelled) {
+        if (shellState.escCancelled || localSignal.aborted || sessionAborted) {
           if (spinner.isSpinning) spinner.stop();
-          clearInterval(verbInterval); shellState.activePollTimer = null;
+          clearAllIntervals();
           logger.info('Aborting Jules task...');
           try {
-            await deleteJulesSession(sessionId, shellState.abortController.signal);
+            await deleteJulesSession(sessionId, localSignal);
           } catch (e) {}
           logger.info('Task cancelled.');
           completed = true;
@@ -1181,7 +1804,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
 
         let activities: any[] = [];
         try {
-          activities = await getSessionActivities(sessionId, shellState.abortController.signal);
+          activities = await getSessionActivities(sessionId, localSignal);
           if (!initialized) {
             const isWaitingForInput = status.requires_user_input === true || 
                                       ['inactive', 'question', 'interrupt', 'user_input_required', 'awaiting_user_feedback'].includes(status.state?.toLowerCase() || status.status?.toLowerCase() || status.type?.toLowerCase() || '');
@@ -1252,12 +1875,12 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           }
         }
 
-        if (shellState.escCancelled) {
+        if (shellState.escCancelled || localSignal.aborted || sessionAborted) {
           if (spinner.isSpinning) spinner.stop();
-          clearInterval(verbInterval); shellState.activePollTimer = null;
+          clearAllIntervals();
           logger.info('Aborting Jules task...');
           try {
-            await deleteJulesSession(sessionId, shellState.abortController.signal);
+            await deleteJulesSession(sessionId, localSignal);
           } catch (e) {}
           logger.info('Task cancelled.');
           completed = true;
@@ -1289,6 +1912,8 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
             try { process.stdin.setRawMode(wasRaw); } catch (e) {}
           }
 
+          clearAllIntervals();
+
           const userReply = await promptJulesReply('Reply (or type /exit):');
 
           if (process.stdin.isTTY) {
@@ -1297,7 +1922,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           process.stdin.resume();
           
 
-          if (shellState.escCancelled || userReply.trim().toLowerCase() === '/exit') {
+          if (shellState.escCancelled || userReply.trim().toLowerCase() === '/exit' || localSignal.aborted) {
             completed = true;
             break;
           }
@@ -1306,7 +1931,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           const bridgedReply = bridgePathsInText(userReply);
           await syncLocalChanges();
           
-          await sendJulesMessage(sessionId, bridgedReply, shellState.abortController.signal);
+          await sendJulesMessage(sessionId, bridgedReply, localSignal);
           msgSpinner.stop();
           logger.success('Message sent successfully.');
 
@@ -1434,7 +2059,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
 
                 const approveSpinner = ora({ text: chalk.dim('Approving plan…'), spinner: 'dots', color: 'white' }).start();
                 try {
-                  await approveJulesPlan(sessionId, shellState.abortController.signal);
+                  await approveJulesPlan(sessionId, localSignal);
                   approveSpinner.stop();
                 } catch (e: any) {
                   approveSpinner.stop();
@@ -1480,12 +2105,12 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
         const upperState = (status.state || status.status || '').toUpperCase();
         if (upperState === 'COMPLETED' || upperState === 'SUCCEEDED' || upperState === 'SUCCESS') {
           if (spinner.isSpinning) spinner.stop();
-          clearInterval(verbInterval); shellState.activePollTimer = null;
+          clearAllIntervals();
           console.log('');
           logger.success('Task Completed!');
           
           try {
-            const finalSession = await getSessionStatus(sessionId, shellState.abortController.signal);
+            const finalSession = await getSessionStatus(sessionId, localSignal);
             const outRepo = finalSession.outputRepo || finalSession.executionStatus?.outputRepo;
             const outBranch = finalSession.outputBranch || finalSession.executionStatus?.outputBranch;
             const compareUrl = finalSession.compareUrl || finalSession.executionStatus?.compareUrl;
@@ -1537,10 +2162,20 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
             }
 
             if (changes.length > 0) {
-              logger.info(`Applying ${changes.length} file changes...`);
-              const applied = await applyChanges(changes);
-              if (applied) {
-                restoreExternalMappedFiles();
+              if (forceSync || shouldApplyChanges(sessionId)) {
+                const applied = await applyChanges(changes);
+                
+                // Save sync state
+                try {
+                  const branch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+                  execSync(`git fetch origin ${branch}`, { stdio: 'ignore' });
+                  const remoteCommit = execSync(`git rev-parse origin/${branch}`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+                  saveSyncState(remoteCommit, sessionId, changes.map(c => c.path), !applied);
+                } catch (e) {}
+
+                if (applied) {
+                  restoreExternalMappedFiles();
+                }
               }
             } else {
               logger.warn('No valid code changes found in the artifact.');
@@ -1552,7 +2187,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           completed = true;
         } else if (upperState === 'FAILED' || upperState === 'ERROR') {
           if (spinner.isSpinning) spinner.stop();
-          clearInterval(verbInterval); shellState.activePollTimer = null;
+          clearAllIntervals();
           logger.error('Jules session failed.');
 
           completed = true;
@@ -1565,6 +2200,8 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
             try { process.stdin.setRawMode(wasRaw); } catch (e) {}
           }
 
+          clearAllIntervals();
+
           const userReply = await promptJulesReply('Chat to resume (or type /exit):');
 
           if (process.stdin.isTTY) {
@@ -1573,7 +2210,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           process.stdin.resume();
           
 
-          if (shellState.escCancelled || userReply.trim().toLowerCase() === '/exit') {
+          if (shellState.escCancelled || userReply.trim().toLowerCase() === '/exit' || localSignal.aborted) {
             completed = true;
             break;
           }
@@ -1582,17 +2219,24 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
           const bridgedReply = bridgePathsInText(userReply);
           await syncLocalChanges();
           
-          await sendJulesMessage(sessionId, bridgedReply, shellState.abortController.signal);
+          await sendJulesMessage(sessionId, bridgedReply, localSignal);
           msgSpinner.stop();
           logger.success('Message sent successfully. Resuming session...');
           
           spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
           continue; // Poll again immediately
         } else {
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          await cancellableSleep(2000);
         }
       } catch (pollError: any) {
-        if (shellState.escCancelled) {
+        if (shellState.escCancelled || localSignal.aborted || sessionAborted) {
+          if (spinner.isSpinning) spinner.stop();
+          clearAllIntervals();
+          logger.info('Aborting Jules task...');
+          try {
+            await deleteJulesSession(sessionId, localSignal);
+          } catch (e) {}
+          logger.info('Task cancelled.');
           completed = true;
           break;
         }
@@ -1608,13 +2252,13 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
             isOffline = true;
             spinner.text = chalk.yellow('⚠ OFFLINE: Waiting for internet connection...');
           }
-          await new Promise(resolve => setTimeout(resolve, 5000));
+          await cancellableSleep(5000);
           continue;
         }
 
         if (spinner.isSpinning) spinner.stop();
         if (pollError.response?.status === 404) {
-           clearInterval(verbInterval); shellState.activePollTimer = null;
+           clearAllIntervals();
            console.log(chalk.yellow('\n⚠ Session not found or has ended.'));
            if (repoUrl) {
              logger.error(`Jules could not find the repository/session.`);
@@ -1628,22 +2272,32 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string) {
         }
         logger.error(`Polling error: ${pollError.message}`);
         spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await cancellableSleep(2000);
       }
     }
   } finally {
-    if (shellState.activePollTimer) {
-      clearInterval(shellState.activePollTimer);
+    if (spinner && spinner.isSpinning) spinner.stop();
+    if (activePollingTimer) {
+      clearInterval(activePollingTimer!);
+      activePollingTimer = null;
+    }
+    if (shellState.activePollTimer === activePollingTimer) {
       shellState.activePollTimer = null;
     }
     
     if (process.stdin.isTTY) {
       try { process.stdin.setRawMode(wasRaw); } catch (e) {}
     }
+
+    // Check for new projects to create repos for
+    await handleNewProjects();
   }
 }
 
 async function handleEdit(instruction: string) {
+  sessionAborted = false;
+  escCancelled = false;
+  const localSignal = shellState.abortController.signal;
   await enforceWorkspace();
   validateEnv();
   let repoUrl = '';
@@ -1685,13 +2339,13 @@ async function handleEdit(instruction: string) {
     let retries = 3;
     while (retries >= 0) {
       try {
-        session = await createJulesSession(bridgedInstruction, repoUrl, branch);
+        session = await createJulesSession(bridgedInstruction, repoUrl, branch, undefined, localSignal);
         break;
       } catch (err: any) {
         if (err.response?.status === 404 && retries > 0) {
           retries--;
           spinner.text = chalk.yellow(`⚠ Waiting for GitHub app sync... Retrying in 3s (${retries} retries left)`);
-          await new Promise(resolve => setTimeout(resolve, 3000));
+          await cancellableSleep(3000);
           spinner.text = chalk.dim('Starting Jules session…');
           continue;
         }
@@ -1965,6 +2619,7 @@ async function handleRestore() {
 }
 
 async function handleSessionCommand(args: string[]) {
+  const localSignal = shellState.abortController.signal;
   await enforceWorkspace();
   validateEnv();
   const subcommand = args[0];
@@ -2032,7 +2687,7 @@ async function handleSessionCommand(args: string[]) {
     }).start();
     
     try {
-      await deleteJulesSession(sessionId, shellState.abortController.signal);
+      await deleteJulesSession(sessionId, localSignal);
       deleteSpinner.stop();
       logger.success(`Session deleted.`);
     } catch (error: any) {
@@ -2040,6 +2695,11 @@ async function handleSessionCommand(args: string[]) {
       logger.error(`Failed to delete: ${error.message}`);
     }
   } else if (subcommand === 'track' || subcommand === 'watch') {
+    escCancelled = false;
+    if (activePollingTimer) {
+      clearInterval(activePollingTimer!);
+      activePollingTimer = null;
+    }
     const sessionId = args[1];
     if (!sessionId) {
       logger.error('Error: Please specify a sessionId. Usage: /session track [sessionId]');
@@ -2047,7 +2707,7 @@ async function handleSessionCommand(args: string[]) {
     }
     const validateSpinner = ora({ text: chalk.dim(`Validating session ${sessionId}…`), spinner: 'dots', color: 'white' }).start();
     try {
-      const status = await getSessionStatus(sessionId, shellState.abortController.signal);
+      const status = await getSessionStatus(sessionId, localSignal);
       validateSpinner.stop();
       
       shellState.trackedSessionId = sessionId;
@@ -2141,8 +2801,8 @@ function expandHistory(line: string, history: string[]): { expanded: string; cha
 async function startShell() {
   let projectName = await enforceWorkspace();
   await ensureGitAndRemoteLinked();
-  const branch = await getCurrentBranch() || 'main';
-  const shadowUrl = await getRemoteUrl();
+  let branch = await getCurrentBranch() || 'main';
+  let shadowUrl = await getRemoteUrl();
 
   const getTermSize = () => ({
     cols: process.stdout.columns || 80,
@@ -2159,8 +2819,10 @@ async function startShell() {
     '  ▀███▀  ▀  ▀  ▀███▀'
   ].join('\n');
 
-  function printMascot() {
-    console.log(chalk.hex('#7C3AED')(squidMascot));
+  function printMascot(cols: number) {
+    if (cols >= 40) {
+      console.log(chalk.hex('#7C3AED')(squidMascot));
+    }
   }
 
   const figletFullText = [
@@ -2171,27 +2833,26 @@ async function startShell() {
     '  \\___/|_|  \\___/|_____||_____|____/     \\____|_____|___|'
   ].join('\n');
 
-  function printAsciiTitle() {
-    const { cols } = getTermSize();
+  function printAsciiTitle(cols: number) {
     if (cols >= 60) {
       console.log(chalk.bold.white(figletFullText));
     } else if (cols >= 40) {
-      console.log(chalk.bold.white('[ JULES CLI ]'));
-      console.log(chalk.bgHex('#7C3AED').white(' JULES C L I ') + ' — research preview Developer: Rev');
-      console.log(chalk.dim(' '.repeat(14) + 'Version: 2.0'));
+      console.log(chalk.bold.white('[ JULES CLI ] ') + chalk.bgMagenta.white(' JULES C L I ') + chalk.dim(' — research preview  Developer: Rev'));
     } else {
-      console.log(chalk.bold.white('JULES CLI v2.0 — Rev'));
+      console.log(chalk.bold.white('JULES CLI — Rev'));
     }
   }
 
   function printInfoPanel(cols: number) {
-    const divider = '─'.repeat(Math.min(cols - 1, 60));
+    const divider = '─'.repeat(Math.max(0, cols - 2));
     const labelWidth = 14;
     const row = (emoji: string, label: string, value: string) => {
       const paddedLabel = (emoji + ' ' + label).padEnd(labelWidth);
       const maxVal = cols - labelWidth - 4;
-      const displayVal = (value && value.length > maxVal && !value.startsWith('http')) ? value.substring(0, maxVal) + '...' : (value || '(none)');
-      return chalk.cyan(paddedLabel) + chalk.white(': ') + chalk.white(displayVal);
+      // URL fields NEVER truncated, NEVER wrapped
+      const isUrl = value && (value.startsWith('http') || label === 'Shadow' || label === 'Session URL');
+      const displayVal = (value && value.length > maxVal && !isUrl) ? value.substring(0, maxVal) + '...' : (value || '(none)');
+      return chalk.cyan(paddedLabel) + chalk.white(': ') + (isUrl ? chalk.yellow(displayVal) : chalk.white(displayVal));
     };
 
     const maskedShadowUrl = shadowUrl ? shadowUrl.replace(/https:\/\/[^@]+@/, 'https://') : '(none)';
@@ -2202,11 +2863,13 @@ async function startShell() {
     console.log(row('⚡', 'Mode', currentMode.toUpperCase()));
     console.log(row('🔗', 'Shadow', maskedShadowUrl));
     console.log(row('🆔', 'Session ID', shellState.trackedSessionId || '(none)'));
-    console.log(chalk.cyan('🌐 Session URL'.padEnd(labelWidth)) + chalk.white(': ') + chalk.yellow(shellState.trackedSessionUrl || '(none)'));
+    console.log(row('🌐', 'Session URL', shellState.trackedSessionUrl || '(none)'));
     console.log(divider);
   }
 
   function printTips(cols: number) {
+    if (cols < 40) return; // MINIMAL mode has no tips
+
     const wrap = (text: string) => {
       const words = text.split(' ');
       let line = '';
@@ -2221,27 +2884,25 @@ async function startShell() {
       if (line.trim()) lines.push(line.trim());
       return lines.join('\n');
     };
+    
+    console.log(chalk.bold('Tips for getting started:'));
+    console.log(wrap('1. Run /init to link this directory to a shadow repository'));
+    console.log(wrap('2. Type your coding instruction and press Enter to edit files'));
     console.log(wrap('/help for commands · /exit to quit'));
     console.log('');
-    console.log(chalk.bold('Tips for getting started:'));
-    console.log(wrap('1. Run /init to link this directory' + ' to a shadow repository'));
-    console.log(wrap('2. Type your coding instruction' + ' and press Enter to edit files'));
   }
 
-  function redrawUI() {
-    const { cols } = getTermSize();
-    console.clear();
-    if (cols >= 40) {
-      printMascot();
-      printAsciiTitle();
-    } else {
-      console.log(chalk.bold.white('JULES CLI v2.0'));
-    }
-    printInfoPanel(cols);
-    printTips(cols);
-    process.stdout.write('\n' + chalk.dim('─'.repeat(Math.max(0, cols - 1))) + '\n');
-    if (!(rl as any).closed) rl.prompt();
-    drawBottomArea(activeMatches);
+  // Detect new projects on startup
+  const newProjectPath = await handleNewProjects();
+  if (newProjectPath) {
+    process.chdir(newProjectPath);
+    projectName = path.basename(newProjectPath);
+    await ensureGitAndRemoteLinked();
+    branch = await getCurrentBranch() || 'main';
+    shadowUrl = await getRemoteUrl();
+    shellState.trackedSessionId = null;
+    shellState.trackedSessionUrl = null;
+    logger.success(`Automatically switched to new project: ${projectName}`);
   }
 
   await printBanner(projectName, branch, currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
@@ -2250,7 +2911,7 @@ async function startShell() {
   console.log(chalk.white('  1. Run ') + chalk.bold.cyan('/init') + chalk.white(' to link this directory to a shadow repository'));
   console.log(chalk.white('  2. Type your coding instruction and press ') + chalk.bold('Enter') + chalk.white(' to edit files\n'));
 
-  const commandsList = ['/init', '/repo', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/help', '/docs', '/shot', '/deleteworkspace', '/exit'];
+  const commandsList = ['/init', '/newrepo', '/repo', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/help', '/docs', '/shot', '/deleteworkspace', '/exit'];
 
   const PROMPT_STR = '> ';
   const PROMPT_LEN = PROMPT_STR.length;
@@ -2295,7 +2956,6 @@ async function startShell() {
   let oldTtyWrite: any = null;
   let shellPastedBlocks: string[] = [];
   let shellPasteCount = 0;
-  let resizeTimer: NodeJS.Timeout | null = null;
 
   const disableShellBracketedPaste = () => {
     process.stdout.write('\u001b[?2004l');
@@ -2316,25 +2976,18 @@ async function startShell() {
     const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
     const actualPromptLen = cleanPrompt.length;
     const col = actualPromptLen + rl.cursor;
-    for (let i = 0; i < activeBottomLines; i++) {
-      readline.moveCursor(process.stdout, 0, 1);
-      readline.clearLine(process.stdout, 0);
-    }
-    readline.moveCursor(process.stdout, 0, -activeBottomLines);
+
+    // Save current position, move to prompt column, clear everything below
     readline.cursorTo(process.stdout, col);
+    readline.clearScreenDown(process.stdout);
     activeBottomLines = 0;
   };
 
   const clearBottomAreaOnEnter = () => {
     if (activeBottomLines === 0) return;
-    readline.clearLine(process.stdout, 0);
-    for (let i = 1; i < activeBottomLines; i++) {
-      readline.moveCursor(process.stdout, 0, 1);
-      readline.clearLine(process.stdout, 0);
-    }
-    if (activeBottomLines > 1) {
-      readline.moveCursor(process.stdout, 0, -(activeBottomLines - 1));
-    }
+    // When Enter is pressed, the cursor is at the end of the input line.
+    // We just need to clear everything below it.
+    readline.clearScreenDown(process.stdout);
     activeBottomLines = 0;
   };
 
@@ -2343,7 +2996,7 @@ async function startShell() {
     const cols = process.stdout.columns || 80;
 
     // Lower threshold for mobile/small screens
-    if (rows < 8) {
+    if (rows < 8 || cols < 30) {
       clearBottomArea();
       shellState.isBottomAreaRendered = false;
       return;
@@ -2352,7 +3005,25 @@ async function startShell() {
     clearBottomArea();
 
     const lines: string[] = [];
-    lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 1))));
+    lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
+
+    const projectName = path.basename(process.cwd());
+    const mode = currentMode.toUpperCase();
+    
+    // Header Line: ⚙️ JULES-CLI | 📁 project [🌿 branch] | ⚡ MODE: FAST
+    const headerContent = `⚙️  JULES-CLI | 📁 ${projectName} [🌿 ${cachedBranch}] | ⚡ MODE: ${mode}`;
+    let truncatedHeader = headerContent;
+    if (truncatedHeader.length > cols - 2) {
+      truncatedHeader = `⚙️  JULES | 📁 ${projectName} [🌿 ${cachedBranch}]`;
+      if (truncatedHeader.length > cols - 2) {
+        truncatedHeader = `⚙️  JULES | 📁 ${projectName}`;
+        if (truncatedHeader.length > cols - 2) {
+          truncatedHeader = truncatedHeader.substring(0, cols - 5) + '...';
+        }
+      }
+    }
+    lines.push(chalk.cyan(truncatedHeader));
+    lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
 
     if (matches.length > 0) {
       const prefix = '  ⎿ ';
@@ -2387,41 +3058,17 @@ async function startShell() {
       lines.push(formattedText);
     }
 
-    const left = '/shot for shortcuts';
-    const right = '/session';
-    if (cols > 40) {
-      const spaceCount = Math.max(2, cols - left.length - right.length - 10);
-      const footer = chalk.dim('  ' + left + ' '.repeat(spaceCount) + right);
-      lines.push(footer);
-    } else if (cols > 20) {
-      lines.push(chalk.dim('  ' + right));
-    }
-
-    const fullCwd = process.cwd();
-    const mode = currentMode.toUpperCase();
-    const modeStr = ` · ${mode} · `;
-    const infoPrefix = `  ⬢ jules-cli${modeStr}`;
-    const infoSuffix = ` [${cachedBranch}]`;
-
-    let statusLine = '';
-    if (cols > 60) {
-      const available = cols - infoPrefix.length - infoSuffix.length - 5;
-      let pathPart = fullCwd;
-      if (pathPart.length > available) {
-        if (available > 10) {
-          pathPart = '...' + pathPart.slice(-(available - 3));
-        } else {
-          pathPart = '...';
-        }
+    // Tips line: 💡 Tips: `/init` to link repo • `/help` for commands • `/exit` to quit
+    const tipsContent = `💡 Tips: \`/init\` to link repo  •  \`/help\` for commands  •  \`/exit\` to quit`;
+    let truncatedTips = tipsContent;
+    if (truncatedTips.length > cols - 2) {
+      truncatedTips = `💡 Tips: /init • /help • /exit`;
+      if (truncatedTips.length > cols - 2) {
+        truncatedTips = truncatedTips.substring(0, cols - 5) + '...';
       }
-      statusLine = chalk.dim(`  ⬢ jules-cli `) + chalk.bold.cyan(modeStr) + chalk.dim(`${pathPart}${infoSuffix}`);
-    } else if (cols > 40) {
-      statusLine = chalk.dim(`  ⬢ jules-cli `) + chalk.bold.cyan(modeStr) + chalk.dim(infoSuffix);
-    } else {
-      statusLine = chalk.dim(`  ⬢ `) + chalk.bold.cyan(mode);
     }
-    lines.push(statusLine);
-    lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 1))));
+    lines.push(chalk.dim(truncatedTips));
+    lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
 
     const currentPrompt = (rl as any)._prompt || '';
     const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
@@ -2444,7 +3091,9 @@ async function startShell() {
     if (shellState.isRestarting || (rl as any).closed) return;
 
     const cols = process.stdout.columns || 80;
-    process.stdout.write('\n' + chalk.dim('─'.repeat(Math.max(0, cols - 1))) + '\n');
+    process.stdout.write('\n' + chalk.bold.cyan('🤖 Jules-CLI » ') + chalk.dim('Type your coding instruction...') + '\n');
+    
+    rl.setPrompt(chalk.bold.cyan('❯ '));
 
     if (!(rl as any).closed) rl.prompt();
 
@@ -2748,18 +3397,7 @@ async function startShell() {
 
     const isEscape = (key && key.name === 'escape') || char === '\u001b' || char === '\x1b';
     if (isEscape) {
-      accumulatedLines = [];
-      altEnterPressed = false;
-      shellPastedBlocks = [];
-      shellPasteCount = 0;
-      rl.setPrompt(chalk.bold.white(PROMPT_STR));
-      (rl as any).line = '';
-      (rl as any).cursor = 0;
-      (rl as any)._refreshLine();
-      activeMatches = [];
-      cyclingIndex = -1;
-      lastCyclingIndex = -1;
-      drawBottomArea([]);
+      handleEscapePress();
       return;
     }
 
@@ -3036,6 +3674,7 @@ async function startShell() {
   showPrompt();
 
   shellState.shellLineHandler = async (line) => {
+    const localSignal = shellState.abortController.signal;
     if (shellState.isRestarting) return;
 
     const endsWithBackslash = line.endsWith('\\');
@@ -3077,6 +3716,20 @@ async function startShell() {
     }
     shellPastedBlocks = [];
     shellPasteCount = 0;
+
+    // Detect new projects before processing task
+    const nextPath = await handleNewProjects();
+    if (nextPath) {
+      process.chdir(nextPath);
+      projectName = path.basename(nextPath);
+      await ensureGitAndRemoteLinked();
+      branch = await getCurrentBranch() || 'main';
+      shadowUrl = await getRemoteUrl();
+      shellState.trackedSessionId = null;
+      shellState.trackedSessionUrl = null;
+      logger.success(`Automatically switched to new project: ${projectName}`);
+      await printBanner(projectName, branch, currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
+    }
 
     const input = substitutedLine.trim();
     if (!input) {
@@ -3148,8 +3801,20 @@ async function startShell() {
             if (!(rl as any).closed) rl.resume();
           }
           break;
+        case '/newrepo':
+          try {
+            if (!(rl as any).closed) rl.pause();
+            await handleNewRepo();
+          } finally {
+            if (!(rl as any).closed) rl.resume();
+          }
+          break;
         case '/repo':
           try {
+            if (!(rl as any).closed) rl.pause();
+            await handleNewProjects();
+            if (!(rl as any).closed) rl.resume();
+
             const wsRoot = getWorkspaceRoot();
             const localProjects = fs.readdirSync(wsRoot).filter(f => {
               const fullPath = path.join(wsRoot, f);
@@ -3241,9 +3906,32 @@ async function startShell() {
         case '/sync':
           try {
             if (!(rl as any).closed) rl.pause();
-            await handleSync();
+            const fetchSpinner = ora({ text: chalk.dim('Fetching latest from Jules...'), color: 'magenta' }).start();
+            try {
+              const branch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+              execSync(`git fetch origin ${branch}`, { stdio: 'ignore' });
+            } catch (e) {}
+            fetchSpinner.stop();
+
+            let sessionIdToTrack = shellState.trackedSessionId;
+            if (!sessionIdToTrack && fs.existsSync(SYNC_STATE_FILE)) {
+              try {
+                const state = JSON.parse(fs.readFileSync(SYNC_STATE_FILE, 'utf8'));
+                sessionIdToTrack = state.sessionId;
+              } catch (e) {}
+            }
+
+            if (sessionIdToTrack) {
+              await trackJulesSession(sessionIdToTrack, undefined, true);
+            } else {
+              await handleSync();
+            }
           } finally {
             if (!(rl as any).closed) rl.resume();
+            if (shellState.keypressHandler) {
+              process.stdin.prependListener('keypress', shellState.keypressHandler);
+            }
+            process.stdout.write('\u001b[?2004h');
           }
           break;
         case '/edit':
@@ -3346,7 +4034,8 @@ async function startShell() {
           };
 
           cmd('/init',                   'Initialize git & link shadow repo');
-          cmd('/repo',                   'Switch between projects');
+          cmd('/newrepo',                'Create new empty private GitHub repo');
+          cmd('/repo',                   'Create GitHub repo or switch projects');
           cmd('/sync',                   'Push local changes to GitHub');
           cmd('/edit [prompt]',          'Ask Jules AI to edit your code');
           cmd('/restore',                'Restore files from .bak backups');
@@ -3395,22 +4084,40 @@ async function startShell() {
     showPrompt();
   };
 
-  rl.on('line', shellState.shellLineHandler);
-  
+  function redrawUI() {
+    const cols = process.stdout.columns || 80;
+    // Clear screen and scrollback buffer more thoroughly
+    process.stdout.write('\u001b[2J\u001b[3J\u001b[H');
+    
+    printMascot(cols);
+    printAsciiTitle(cols);
+    printInfoPanel(cols);
+    printTips(cols);
+
+    activeBottomLines = 0; // Reset before drawing
+    if (shellState.activeRl && !(shellState.activeRl as any).closed) {
+      shellState.activeRl.prompt(true);
+    }
+    drawBottomArea(activeMatches);
+  }
+
+  let resizeTimer: NodeJS.Timeout | null = null;
   const resizeHandler = () => {
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
-      activeBottomLines = 0;
+      activeBottomLines = 0; // Force reset because terminal viewport has reflowed
       redrawUI();
       resizeTimer = null;
     }, 150);
   };
   process.on('SIGWINCH', resizeHandler);
 
+  rl.on('line', shellState.shellLineHandler);
+
   rl.on('close', () => {
+    process.off('SIGWINCH', resizeHandler);
     disableShellBracketedPaste();
     process.off('exit', disableShellBracketedPaste);
-    process.off('SIGWINCH', resizeHandler);
     if (shellState.keypressHandler) {
       process.stdin.removeListener('keypress', shellState.keypressHandler);
     }
@@ -3503,6 +4210,19 @@ program
 
 // If no arguments, start shell
 if (require.main === module) {
+  // 1. Load .env
+  dotenv.config();
+
+  // 2. Auto-append missing fields if needed
+  ensureEnvFields();
+
+  // 3. Validate all required vars
+  validateEnv();
+
+  // 4. Clear session vars for fresh start
+  shellState.trackedSessionId = null;
+  shellState.trackedSessionUrl = null;
+
   if (process.argv.length <= 2) {
     startShell().catch(error => {
       logger.error(`Shell failed: ${error.message}`);

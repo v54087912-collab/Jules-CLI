@@ -8,9 +8,12 @@ import axios from 'axios';
 // Load .env from process.cwd() first
 dotenv.config();
 
-// Fallback to the CLI installation folder if variables are not set
-if (!process.env.JULES_API_KEY || !process.env.GITHUB_TOKEN) {
-  dotenv.config({ path: path.join(__dirname, '../.env') });
+// Fallback to the CLI installation folder if required variables are missing
+const requiredVars = ['JULES_API_KEY', 'GITHUB_TOKEN', 'GITHUB_USER', 'GITHUB_EMAIL'];
+const isMissingAny = requiredVars.some(v => !process.env[v] || process.env[v]?.trim() === '');
+
+if (isMissingAny) {
+  dotenv.config({ path: path.join(__dirname, '../.env'), override: true });
 }
 
 export const config = {
@@ -20,14 +23,32 @@ export const config = {
 };
 
 export function validateEnv() {
-  if (!config.JULES_API_KEY) {
-    console.error(chalk.red('✗ ') + chalk.white('JULES_API_KEY is not set in .env'));
+  const required = {
+    'JULES_API_KEY' : process.env.JULES_API_KEY,
+    'GITHUB_TOKEN'  : process.env.GITHUB_TOKEN,
+    'GITHUB_USER'   : process.env.GITHUB_USER,
+    'GITHUB_EMAIL'  : process.env.GITHUB_EMAIL,
+  };
+  
+  const missing: string[] = [];
+  
+  for (const [key, val] of Object.entries(required)) {
+    if (!val || val.trim() === '') {
+      missing.push(key);
+    }
+  }
+  
+  if (missing.length > 0) {
+    console.log(chalk.red('❌ Missing required .env values:'));
+    missing.forEach(k => {
+      console.log(chalk.yellow(`  → ${k}=`));
+    });
+    console.log(chalk.gray(`  Edit: ${path.join(process.cwd(), '.env')}`));
+    console.log(chalk.gray('  Then restart Jules CLI.'));
     process.exit(1);
   }
-  if (!config.GITHUB_TOKEN) {
-    console.error(chalk.red('✗ ') + chalk.white('GITHUB_TOKEN is not set in .env'));
-    process.exit(1);
-  }
+  
+  console.log(chalk.green('✓ Environment validated.'));
 }
 
 // ── Logger — Claude Code style ────────────────────────────────────────────────
@@ -148,6 +169,7 @@ export async function printBanner(
       const subtitle = chalk.dim('  —  research preview Developer: Rev');
       const badgeLineLength = 14 + subtitle.replace(/\x1b\[[0-9;]*m/g, '').length;
       console.log('\n' + center(badge + subtitle, badgeLineLength));
+      console.log(center(chalk.dim('Version: 2.0'), 12));
 
       // 4. Info Section
       const divider = chalk.dim('  ' + '─'.repeat(Math.min(cols - 4, 50)));
@@ -196,22 +218,24 @@ export async function printBanner(
   draw(0, true);
 }
 
-
-
 export const shellState = {
   activeRl: null as readline.Interface | null,
+  activePollTimer: null as NodeJS.Timeout | null,
+  escCancelled: false,
+  sessionAborted: false,
+  abortController: new AbortController(),
   shellLineHandler: null as ((line: string) => Promise<void>) | null,
   keypressHandler: null as ((char: any, key: any) => void) | null,
   trackedSessionId: null as string | null,
   trackedSessionUrl: null as string | null,
   diffPending: false,
   isBottomAreaRendered: false,
-  octopusInterval: null as NodeJS.Timeout | null,
-  animationFrame: 0,
   isRestarting: false,
+  isTaskActive: false,
 };
 
 export function askUser(query: string): Promise<string> {
+  const localSignal = shellState.abortController.signal;
   process.stdin.resume();
 
   if (shellState.activeRl && shellState.shellLineHandler) {
@@ -222,8 +246,14 @@ export function askUser(query: string): Promise<string> {
     shellState.activeRl.resume();
     return new Promise(resolve => {
       shellState.activeRl!.question(query, (ans) => {
+        if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
+          resolve('');
+          return;
+        }
         shellState.activeRl!.pause();
-        shellState.activeRl!.on('line', shellState.shellLineHandler!);
+        if (shellState.shellLineHandler) {
+          shellState.activeRl!.on('line', shellState.shellLineHandler!);
+        }
         if (shellState.keypressHandler) {
           process.stdin.on('keypress', shellState.keypressHandler);
         }
@@ -231,23 +261,19 @@ export function askUser(query: string): Promise<string> {
       });
     });
   } else {
-    let rl;
-    try {
-      rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-        terminal: process.stdin.isTTY
-      });
-    } catch (e) {
-      rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-        terminal: false
-      });
-    }
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+    shellState.activeRl = rl;
     return new Promise(resolve => {
       rl.question(query, (ans) => {
         rl.close();
+        shellState.activeRl = null;
+        if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
+          resolve('');
+          return;
+        }
         resolve(ans);
       });
     });
@@ -256,4 +282,19 @@ export function askUser(query: string): Promise<string> {
 
 export function closeAskUser() {
   // No-op as we now close interfaces per-call in non-shell mode
+}
+
+export function cancellableSleep(ms: number): Promise<void> {
+  const localSignal = shellState.abortController.signal;
+  return new Promise((resolve) => {
+    const checkInterval = 100;
+    let elapsed = 0;
+    const interval = setInterval(() => {
+      elapsed += checkInterval;
+      if (elapsed >= ms || shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
+        clearInterval(interval);
+        resolve();
+      }
+    }, checkInterval);
+  });
 }

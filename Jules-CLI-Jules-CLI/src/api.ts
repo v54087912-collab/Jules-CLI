@@ -40,7 +40,7 @@ export async function createShadowRepo(name: string): Promise<string> {
   }
 }
 
-export async function createJulesSession(prompt: string, repoUrl: string, branch: string = 'main', model?: string) {
+export async function createJulesSession(prompt: string, repoUrl: string, branch: string = 'main', model?: string, signal?: AbortSignal) {
   // Extract owner/repo from URL and clean up any auth tokens
   const match = repoUrl.match(/github\.com[\/:](.+?)\/(.+?)(\.git)?$/);
   if (!match) throw new Error('Invalid GitHub URL');
@@ -60,38 +60,38 @@ export async function createJulesSession(prompt: string, repoUrl: string, branch
     payload.model = model;
   }
 
-  const response = await julesApi.post('/sessions', payload);
+  const response = await julesApi.post('/sessions', payload, { signal });
   return response.data;
 }
 
 
-export async function getSessionStatus(sessionId: string) {
-  const response = await julesApi.get(`/sessions/${sessionId}`);
+export async function getSessionStatus(sessionId: string, signal?: AbortSignal) {
+  const response = await julesApi.get(`/sessions/${sessionId}`, { params: { t: Date.now() }, signal });
   return response.data;
 }
 
-export async function getSessionActivities(sessionId: string) {
-  const response = await julesApi.get(`/sessions/${sessionId}/activities`);
+export async function getSessionActivities(sessionId: string, signal?: AbortSignal) {
+  const response = await julesApi.get(`/sessions/${sessionId}/activities`, { params: { t: Date.now() }, signal });
   return response.data.activities || [];
 }
 
-export async function sendJulesMessage(sessionId: string, prompt: string) {
-  const response = await julesApi.post(`/sessions/${sessionId}:sendMessage`, { prompt });
+export async function sendJulesMessage(sessionId: string, prompt: string, signal?: AbortSignal) {
+  const response = await julesApi.post(`/sessions/${sessionId}:sendMessage`, { prompt }, { signal });
   return response.data;
 }
 
-export async function approveJulesPlan(sessionId: string) {
-  const response = await julesApi.post(`/sessions/${sessionId}:approvePlan`, {});
+export async function approveJulesPlan(sessionId: string, signal?: AbortSignal) {
+  const response = await julesApi.post(`/sessions/${sessionId}:approvePlan`, {}, { signal });
   return response.data;
 }
 
-export async function listJulesSessions() {
-  const response = await julesApi.get('/sessions');
+export async function listJulesSessions(signal?: AbortSignal) {
+  const response = await julesApi.get('/sessions', { params: { t: Date.now() }, signal });
   return response.data.sessions || [];
 }
 
-export async function deleteJulesSession(sessionId: string) {
-  const response = await julesApi.delete(`/sessions/${sessionId}`);
+export async function deleteJulesSession(sessionId: string, signal?: AbortSignal) {
+  const response = await julesApi.delete(`/sessions/${sessionId}`, { signal });
   return response.data;
 }
 
@@ -107,3 +107,23 @@ export async function listUserRepos() {
     return [];
   }
 }
+
+export async function createNewRepo(name: string, description: string = ''): Promise<any> {
+  try {
+    const { data: repo } = await octokit.repos.createForAuthenticatedUser({
+      name,
+      description,
+      private: true,
+      auto_init: false,
+    });
+    return repo;
+  } catch (error: any) {
+    if (error.status === 422) {
+      throw new Error('Repo name taken. Try another.');
+    }
+    throw error;
+  }
+}
+
+
+

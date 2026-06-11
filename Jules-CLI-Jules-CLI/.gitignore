@@ -10,3 +10,4 @@ current_sessions.json
 recent_5.json
 session_status.json
 mock-jules.js
+.jules-sync-state.json

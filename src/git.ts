@@ -59,6 +59,34 @@ export async function syncLocalChanges(): Promise<void> {
   });
   
   const localGit = git.cwd(process.cwd());
+
+  // Setup identity
+  const name = process.env.GITHUB_USER;
+  const email = process.env.GITHUB_EMAIL;
+  if (!name || !email) {
+    throw new Error('GITHUB_USER or GITHUB_EMAIL missing in .env');
+  }
+  try {
+    await localGit.addConfig('user.name', name);
+    await localGit.addConfig('user.email', email);
+  } catch (e) {}
+
+  // Setup auth remote
+  const token = process.env.GITHUB_TOKEN;
+  const user = process.env.GITHUB_USER;
+  const repo = process.env.SHADOW_REPO || 'jules-shadow-default-project';
+  if (!token || !user) {
+    throw new Error('GITHUB_TOKEN or GITHUB_USER missing in .env');
+  }
+  
+  const url = `https://${token}@github.com/${user}/${repo}.git`;
+  const remotes = await localGit.getRemotes();
+  if (remotes.find(r => r.name === 'origin')) {
+    await localGit.remote(['set-url', 'origin', url]);
+  } else {
+    await localGit.addRemote('origin', url);
+  }
+
   syncBar.start(4, 0, { task: 'Scanning and staging local changes...' });
   await localGit.add('.');
   syncBar.update(1, { task: 'Checking git status...' });
