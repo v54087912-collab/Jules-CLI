@@ -2836,10 +2836,13 @@ async function startShell() {
   function printAsciiTitle(cols: number) {
     if (cols >= 60) {
       console.log(chalk.bold.white(figletFullText));
+      console.log(chalk.bold.white('\n                JULES  C L I   —  research preview Developer: Rev'));
+      console.log(chalk.bold.white('                Version: 2.0'));
     } else if (cols >= 40) {
-      console.log(chalk.bold.white('[ JULES CLI ] ') + chalk.bgMagenta.white(' JULES C L I ') + chalk.dim(' — research preview  Developer: Rev'));
+      console.log(chalk.bold.white('[ JULES CLI ] ') + chalk.dim('— research preview Developer: Rev'));
+      console.log(chalk.bold.white('                Version: 2.0'));
     } else {
-      console.log(chalk.bold.white('JULES CLI — Rev'));
+      console.log(chalk.bold.white('JULES CLI — Rev v2.0'));
     }
   }
 
