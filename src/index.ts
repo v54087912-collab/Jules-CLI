@@ -439,7 +439,15 @@ async function createPrivateGitHubRepo(repoName: string, description: string, fo
 }
 
 function handleEscapePress() {
-  if (escCancelled || sessionAborted) return;
+  if (escCancelled || sessionAborted) {
+     if (shellState.activeRl && !shellState.isBottomAreaRendered) {
+         // Do not fully return if it's just clearing a normal prompt line
+         (shellState.activeRl as any).line = '';
+         (shellState.activeRl as any).cursor = 0;
+         (shellState.activeRl as any)._refreshLine();
+     }
+     return;
+  }
   escCancelled = true;
   sessionAborted = true;
   shellState.escCancelled = true;
@@ -480,9 +488,21 @@ function handleEscapePress() {
 
       // ONLY write \n if we are NOT in the middle of a polling task, 
       // OR if we know for sure we are in a sub-prompt.
-      // Since we can't be sure, we'll rely on the escCancelled flag.
-      shellState.activeRl.write('\n');
-      cancelledAny = true;
+      // We shouldn't write '\n' if we are just clearing the shell input prompt,
+      // otherwise it triggers empty commands and can exit or cause bugs.
+      // If we are just typing a command and hit ESC, we just clear it without sending \n.
+      if (cancelledAny || (shellState.activeRl as any)._prompt !== chalk.bold.cyan('❯ ')) {
+        shellState.activeRl.write('\n');
+        cancelledAny = true;
+      } else {
+        // Just clear the line
+        escCancelled = false;
+        sessionAborted = false;
+        shellState.escCancelled = false;
+        shellState.sessionAborted = false;
+        shellState.abortController = new AbortController();
+        return; // Don't abort the active controller as we're just typing
+      }
     } else {
       // Not in shell mode, just close the interface
       shellState.activeRl.close();
@@ -509,10 +529,24 @@ if (process.stdin.isTTY) {
 process.stdin.on('keypress', (char, key) => {
   const isEscape = (key && key.name === 'escape') || char === '\u001b' || char === '\x1b';
   if (isEscape) {
+    if (shellState.activeRl) {
+      (shellState.activeRl as any).line = '';
+      (shellState.activeRl as any).cursor = 0;
+      (shellState.activeRl as any)._refreshLine();
+    }
     handleEscapePress();
+    return;
   }
   // Standard Ctrl+C handling
   if (key && key.ctrl && key.name === 'c') {
+    if (shellState.activeRl) {
+      if ((shellState.activeRl as any).line || shellState.isBottomAreaRendered) {
+        (shellState.activeRl as any).line = '';
+        (shellState.activeRl as any).cursor = 0;
+        (shellState.activeRl as any)._refreshLine();
+        return;
+      }
+    }
     process.exit(0);
   }
 });
@@ -1241,6 +1275,11 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
 
     const isEscape = (key && key.name === 'escape') || char === '\u001b' || char === '\x1b';
     if (isEscape) {
+      if (shellState.activeRl) {
+        (shellState.activeRl as any).line = '';
+        (shellState.activeRl as any).cursor = 0;
+        (shellState.activeRl as any)._refreshLine();
+      }
       handleEscapePress();
       return;
     }
@@ -1443,6 +1482,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
         
         const fullLine = accumulatedLines.join('\n');
         let substitutedLine = fullLine;
+        let anyPasted = false;
         for (let i = 0; i < replyPastedBlocks.length; i++) {
           const placeholderPattern = `[pasted text #${i + 1} [`;
           const idx = substitutedLine.indexOf(placeholderPattern);
@@ -1450,10 +1490,17 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
             const endIdx = substitutedLine.indexOf(']]', idx + placeholderPattern.length);
             if (endIdx !== -1) {
               const fullPlaceholder = substitutedLine.substring(idx, endIdx + 2);
+              anyPasted = true;
               substitutedLine = substitutedLine.replace(fullPlaceholder, replyPastedBlocks[i]);
             }
           }
         }
+        if (anyPasted) {
+          console.log("\n" + chalk.cyan("--- Expanded Pasted Content ---"));
+          console.log(chalk.dim(substitutedLine));
+          console.log(chalk.cyan("-------------------------------") + "\n");
+        }
+
         replyPastedBlocks = [];
         replyPasteCount = 0;
         
@@ -3400,6 +3447,11 @@ async function startShell() {
 
     const isEscape = (key && key.name === 'escape') || char === '\u001b' || char === '\x1b';
     if (isEscape) {
+      if (shellState.activeRl) {
+        (shellState.activeRl as any).line = '';
+        (shellState.activeRl as any).cursor = 0;
+        (shellState.activeRl as any)._refreshLine();
+      }
       handleEscapePress();
       return;
     }
@@ -3435,7 +3487,9 @@ async function startShell() {
         if (rl.line || accumulatedLines.length > 0 || isPasting) {
           accumulatedLines = [];
           altEnterPressed = false;
-          shellPastedBlocks = [];
+
+
+    shellPastedBlocks = [];
           shellPasteCount = 0;
           isPasting = false;
           rl.setPrompt(chalk.bold.white(PROMPT_STR));
@@ -3706,17 +3760,26 @@ async function startShell() {
     shellState.isBottomAreaRendered = false;
     
     let substitutedLine = fullLine;
+    let anyPastedShellLocal = false;
     for (let i = 0; i < shellPastedBlocks.length; i++) {
       const placeholderPattern = `[pasted text #${i + 1} [`;
       const idx = substitutedLine.indexOf(placeholderPattern);
       if (idx !== -1) {
         const endIdx = substitutedLine.indexOf(']]', idx + placeholderPattern.length);
         if (endIdx !== -1) {
+          anyPastedShellLocal = true;
           const fullPlaceholder = substitutedLine.substring(idx, endIdx + 2);
           substitutedLine = substitutedLine.replace(fullPlaceholder, shellPastedBlocks[i]);
         }
       }
     }
+
+    if (anyPastedShellLocal) {
+      console.log('\n' + chalk.cyan('--- Expanded Pasted Content ---'));
+      console.log(chalk.dim(substitutedLine));
+      console.log(chalk.cyan('-------------------------------') + '\n');
+    }
+
     shellPastedBlocks = [];
     shellPasteCount = 0;
 
@@ -4109,7 +4172,17 @@ async function startShell() {
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       activeBottomLines = 0; // Force reset because terminal viewport has reflowed
-      redrawUI();
+
+      // Instead of completely resetting state with redrawUI,
+      // check if we're active in shell and redraw the bottom area only
+      if (shellState.activeRl && !(shellState.activeRl as any).closed) {
+         if (shellState.isBottomAreaRendered) {
+             drawBottomArea(activeMatches);
+         }
+      } else {
+         redrawUI();
+      }
+
       resizeTimer = null;
     }, 150);
   };
