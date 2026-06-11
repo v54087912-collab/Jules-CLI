@@ -40,6 +40,20 @@
 
 ---
 
+## 🚀 Recent Improvements
+
+- **🆕 Modern Input UI**: A redesigned, intuitive shell interface:
+  - **Status Header**: Persistent view of current Project, Branch (`[🌿 master]`), and Mode (`⚡ FAST`).
+  - **Prompt Line**: Dedicated AI prompt line (`🤖 Jules-CLI »`) with a clean input cursor (`❯`).
+  - **Interactive Tips**: Contextual tips at the bottom for quick access to `/help`, `/init`, and `/exit`.
+- **📱 Responsive Terminal Layout**:
+  - **Smart Truncation**: Automatic path and info truncation ensuring the UI never breaks or overflows on mobile screens (Termux) or small terminal windows.
+  - **Buffer Safety**: All dividers and bars are strictly bounded to terminal width to prevent "orphan" characters and line breaks.
+- **🔄 Dynamic Resize Support**:
+  - **Live UI Restoration**: Full UI redrawing upon terminal zoom or window resize (`SIGWINCH` handling), maintaining a clean workspace without losing prompt context.
+
+---
+
 ## 🚀 Quick Start (Setup Guide)
 
 Follow these steps to get Jules Local Bridge up and running:
