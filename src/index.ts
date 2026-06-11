@@ -1049,8 +1049,12 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
       }
       try {
         const status = await getSessionStatus(sessionId, localSignal);
-        const newStatus = status.description || status.state || status.status || '';
-        if (newStatus && newStatus !== liveStatus) {
+        let newStatus = status.description || status.state || status.status || '';
+        const isWaiting = status.requires_user_input === true || ['inactive', 'question', 'interrupt', 'user_input_required', 'awaiting_user_feedback'].includes(status.state?.toLowerCase() || status.status?.toLowerCase() || status.type?.toLowerCase() || '');
+        if (isWaiting) {
+           newStatus = ''; // Suppress active working log
+        }
+        if (newStatus !== liveStatus) {
           liveStatus = newStatus;
           drawReplyBottomArea();
         }
