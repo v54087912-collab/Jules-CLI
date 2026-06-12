@@ -106,7 +106,8 @@ export async function printBanner(
   shadowUrl: string | null = null,
   sessionId: string | null = null,
   sessionUrl: string | null = null,
-  skipClear: boolean = false
+  skipClear: boolean = false,
+  skipAnimation: boolean = false
 ) {
   const cols = process.stdout.columns || 80;
   const purple = chalk.hex('#7C3AED');
@@ -208,6 +209,11 @@ export async function printBanner(
       console.log(chalk.dim('  /help for commands · /exit to quit\n'));
     }
   };
+
+  if (skipAnimation) {
+    draw(0, true);
+    return;
+  }
 
   // Animation logic: 3 loops of 3 frames
   for (let loop = 0; loop < 3; loop++) {

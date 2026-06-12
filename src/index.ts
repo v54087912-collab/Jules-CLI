@@ -3235,6 +3235,7 @@ async function startShell() {
   };
 
   const showPrompt = () => {
+    shellState.isTaskActive = false;
     shellState.escCancelled = false;
     shellState.sessionAborted = false;
     shellState.abortController = new AbortController();
@@ -3849,6 +3850,7 @@ async function startShell() {
     const fullLine = accumulatedLines.join('\n');
     accumulatedLines = [];
     rl.setPrompt(chalk.bold.white(PROMPT_STR));
+    shellState.isTaskActive = true;
 
     if (shellState.keypressHandler) {
       process.stdin.removeListener('keypress', shellState.keypressHandler);
@@ -4269,17 +4271,21 @@ async function startShell() {
   function redrawUI() {
     const cols = process.stdout.columns || 80;
     
-    // Move to top-left but don't clear the whole scrollback
-    process.stdout.write('\u001b[H');
-    
-    // Redraw the banner without clearing
-    printBanner(projectName, branch, currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl, true);
+    if (!shellState.isTaskActive && !shellState.trackedSessionId) {
+      // Move to top-left but don't clear the whole scrollback
+      process.stdout.write('\u001b[H');
+      
+      // Redraw the banner without clearing and without animation
+      printBanner(projectName, branch, currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl, true, true);
+    }
 
     activeBottomLines = 0; // Reset before drawing
     if (shellState.activeRl && !(shellState.activeRl as any).closed) {
       shellState.activeRl.prompt(true);
     }
-    drawBottomArea(activeMatches);
+    if (!shellState.isTaskActive) {
+      drawBottomArea(activeMatches);
+    }
   }
 
   let resizeTimer: NodeJS.Timeout | null = null;
