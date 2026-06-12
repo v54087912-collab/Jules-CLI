@@ -1388,6 +1388,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
   };
 
   process.stdin.resume();
+  process.stdin.removeListener('keypress', keypressHandler);
   process.stdin.prependListener('keypress', keypressHandler);
   rl.on('SIGINT', sigintHandler);
 
@@ -1551,6 +1552,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
             rl!.on('line', oldLineHandler);
           }
           if (oldKeypressHandler) {
+            process.stdin.removeListener('keypress', oldKeypressHandler);
             process.stdin.prependListener('keypress', oldKeypressHandler);
           }
         }
@@ -3820,6 +3822,7 @@ async function startShell() {
 
   shellState.keypressHandler = handleKeypress;
   shellState.showPrompt = showPrompt;
+  process.stdin.removeListener('keypress', handleKeypress);
   process.stdin.prependListener('keypress', handleKeypress);
 
   console.log(chalk.dim('  Type /help for commands · /exit to quit'));
@@ -3879,6 +3882,7 @@ async function startShell() {
         shellPastedBlocks = [];
         shellPasteCount = 0;
         if (shellState.keypressHandler) {
+          process.stdin.removeListener('keypress', shellState.keypressHandler);
           process.stdin.prependListener('keypress', shellState.keypressHandler);
         }
         process.stdout.write('\u001b[?2004h');
@@ -3907,6 +3911,7 @@ async function startShell() {
     const input = substitutedLine.trim();
     if (!input) {
       if (shellState.keypressHandler) {
+        process.stdin.removeListener('keypress', shellState.keypressHandler);
         process.stdin.prependListener('keypress', shellState.keypressHandler);
       }
       process.stdout.write('\u001b[?2004h');
@@ -3937,6 +3942,7 @@ async function startShell() {
     
     if (printOnly) {
       if (shellState.keypressHandler) {
+        process.stdin.removeListener('keypress', shellState.keypressHandler);
         process.stdin.prependListener('keypress', shellState.keypressHandler);
       }
       showPrompt();
@@ -3957,6 +3963,7 @@ async function startShell() {
         } finally {
           if (!(rl as any).closed) rl.resume();
           if (shellState.keypressHandler) {
+            process.stdin.removeListener('keypress', shellState.keypressHandler);
             process.stdin.prependListener('keypress', shellState.keypressHandler);
           }
           process.stdout.write('\u001b[?2004h');
@@ -4102,6 +4109,7 @@ async function startShell() {
           } finally {
             if (!(rl as any).closed) rl.resume();
             if (shellState.keypressHandler) {
+              process.stdin.removeListener('keypress', shellState.keypressHandler);
               process.stdin.prependListener('keypress', shellState.keypressHandler);
             }
             process.stdout.write('\u001b[?2004h');
@@ -4251,6 +4259,7 @@ async function startShell() {
       logger.error(`Command failed: ${execError.message}`);
     }
     if (shellState.keypressHandler) {
+      process.stdin.removeListener('keypress', shellState.keypressHandler);
       process.stdin.prependListener('keypress', shellState.keypressHandler);
     }
     process.stdout.write('\u001b[?2004h');
