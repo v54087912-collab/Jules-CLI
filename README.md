@@ -83,6 +83,8 @@ Create a `.env` file with these keys:
 ```env
 JULES_API_KEY=your_key_here
 GITHUB_TOKEN=your_token_here
+GITHUB_USER=your_github_username_here
+GITHUB_EMAIL=[your_github_Email_username_here]@users.noreply.github.com
 ```
 
 #### **Generate JULES_API_KEY**

@@ -29,6 +29,8 @@ cd "/storage/emulated/0/Jules-CLI-Jules-CLI"
 Create a `.env` file with these keys:
 - `JULES_API_KEY`: Your Google Jules API key.
 - `GITHUB_TOKEN`: Your GitHub Personal Access Token.
+- `GITHUB_USER`: your_github_username_here
+- `GITHUB_EMAIL`: [your_github_Email_username_here]@users.noreply.github.com
 
 ### **2. Generate JULES_API_KEY**
 - Visit the **[Jules Settings Page](https://jules.google.com/settings#api)**.

@@ -105,7 +105,8 @@ export async function printBanner(
   mode: string = 'FAST',
   shadowUrl: string | null = null,
   sessionId: string | null = null,
-  sessionUrl: string | null = null
+  sessionUrl: string | null = null,
+  skipClear: boolean = false
 ) {
   const cols = process.stdout.columns || 80;
   const purple = chalk.hex('#7C3AED');
@@ -148,8 +149,10 @@ export async function printBanner(
   }
 
   const draw = (frameIndex: number, isFinal: boolean = false) => {
-    // Clear screen and move to top
-    process.stdout.write('\u001b[H\u001b[J');
+    // Only clear if we aren't skipping it
+    if (!skipClear || !isFinal) {
+      process.stdout.write('\u001b[H\u001b[J');
+    }
 
     // 1. Center Octopus
     octopusBase.forEach(line => {
@@ -226,6 +229,7 @@ export const shellState = {
   abortController: new AbortController(),
   shellLineHandler: null as ((line: string) => Promise<void>) | null,
   keypressHandler: null as ((char: any, key: any) => void) | null,
+  showPrompt: null as (() => void) | null,
   trackedSessionId: null as string | null,
   trackedSessionUrl: null as string | null,
   diffPending: false,
@@ -237,6 +241,10 @@ export const shellState = {
 export function askUser(query: string): Promise<string> {
   const localSignal = shellState.abortController.signal;
   process.stdin.resume();
+  readline.emitKeypressEvents(process.stdin);
+  if (process.stdin.isTTY) {
+    try { process.stdin.setRawMode(true); } catch (e) {}
+  }
 
   if (shellState.activeRl && shellState.shellLineHandler) {
     shellState.activeRl.off('line', shellState.shellLineHandler);
@@ -245,19 +253,45 @@ export function askUser(query: string): Promise<string> {
     }
     shellState.activeRl.resume();
     return new Promise(resolve => {
-      shellState.activeRl!.question(query, (ans) => {
-        if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
-          resolve('');
-          return;
+      let resolved = false;
+      const tempKeypress = (char: any, key: any) => {
+        const isEscape = (key && key.name === 'escape' && (key.sequence === '\u001b' || key.sequence === '\x1b')) ||
+                         (!key && (char === '\u001b' || char === '\x1b'));
+        if (isEscape && !resolved) {
+          resolved = true;
+          shellState.escCancelled = true;
+          shellState.sessionAborted = true;
+          shellState.abortController.abort();
+          if (shellState.activeRl) {
+            (shellState.activeRl as any).line = '';
+            (shellState.activeRl as any).cursor = 0;
+            try { (shellState.activeRl as any)._refreshLine(); } catch (e) {}
+            try {
+              shellState.activeRl.write('\n');
+            } catch (e) {}
+          }
         }
+      };
+      process.stdin.on('keypress', tempKeypress);
+
+      shellState.activeRl!.question(query, (ans) => {
+        resolved = true;
+        process.stdin.removeListener('keypress', tempKeypress);
+        const isCancelled = shellState.escCancelled || localSignal.aborted || shellState.sessionAborted;
         shellState.activeRl!.pause();
         if (shellState.shellLineHandler) {
+          shellState.activeRl!.off('line', shellState.shellLineHandler!);
           shellState.activeRl!.on('line', shellState.shellLineHandler!);
         }
         if (shellState.keypressHandler) {
+          process.stdin.removeListener('keypress', shellState.keypressHandler);
           process.stdin.on('keypress', shellState.keypressHandler);
         }
-        resolve(ans);
+        if (isCancelled) {
+          resolve('');
+        } else {
+          resolve(ans);
+        }
       });
     });
   } else {
@@ -267,14 +301,32 @@ export function askUser(query: string): Promise<string> {
     });
     shellState.activeRl = rl;
     return new Promise(resolve => {
+      let resolved = false;
+      const tempKeypress = (char: any, key: any) => {
+        const isEscape = (key && key.name === 'escape' && (key.sequence === '\u001b' || key.sequence === '\x1b')) ||
+                         (!key && (char === '\u001b' || char === '\x1b'));
+        if (isEscape && !resolved) {
+          resolved = true;
+          shellState.escCancelled = true;
+          shellState.sessionAborted = true;
+          shellState.abortController.abort();
+          try {
+            rl.write('\n');
+          } catch (e) {}
+        }
+      };
+      process.stdin.on('keypress', tempKeypress);
+
       rl.question(query, (ans) => {
+        resolved = true;
+        process.stdin.removeListener('keypress', tempKeypress);
         rl.close();
         shellState.activeRl = null;
         if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
           resolve('');
-          return;
+        } else {
+          resolve(ans);
         }
-        resolve(ans);
       });
     });
   }

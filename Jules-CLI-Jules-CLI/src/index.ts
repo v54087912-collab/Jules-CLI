@@ -22,8 +22,6 @@ const SYNC_STATE_FILE = '.jules-sync-state.json';
 let activePollingTimer: ReturnType<typeof setInterval> | null = null;
 const activeIntervals = new Set<NodeJS.Timeout>();
 let activeSpinner: any | null = null;
-let escCancelled = false;
-let sessionAborted = false;
 let activePromptReject: (() => void) | null = null;
 
 function clearAllIntervals() {
@@ -439,63 +437,61 @@ async function createPrivateGitHubRepo(repoName: string, description: string, fo
 }
 
 function handleEscapePress() {
-  if (escCancelled || sessionAborted) return;
-  escCancelled = true;
-  sessionAborted = true;
+  if (shellState.escCancelled) return;
   shellState.escCancelled = true;
   shellState.sessionAborted = true;
 
+  // Abort any pending API calls IMMEDIATELY
+  shellState.abortController.abort();
+
   let cancelledAny = false;
 
-  // Cancel ALL active polling loops and spinners
+  // 1. Cancel active spinners/intervals
   if (activeIntervals.size > 0 || (activeSpinner && activeSpinner.isSpinning)) {
     clearAllIntervals();
-    process.stdout.write(
-      '\n⛔ Session task cancelled.' +
-      ' Returning to prompt.\n> '
-    );
+    process.stdout.write(chalk.yellow('\n\n⛔ Task cancelled by user (ESC).\n'));
     cancelledAny = true;
   }
 
+  // 2. Reject any active pending promise-based prompts
   if (activePromptReject) {
     activePromptReject();
     activePromptReject = null;
+    cancelledAny = true;
   }
 
-  // Cancel active readline prompt
+  // 3. Handle Readline buffer and state
   if (shellState.activeRl) {
-    // If it's a sub-prompt (like askUser or promptJulesReply), we need to trigger its resolution
-    // We can check if it has a custom line listener (not the shell one)
-    if (shellState.shellLineHandler) {
-      // In shell mode, but are we in a sub-prompt?
-      
-      // If we are actually in a question, break it.
-      // We can't know for sure, but we only want to write \n if something is truly waiting for it.
-      // If a task was running (cancelledAny is true), the \n might be harmful if it hits the shell.
-      // However, if we are in promptJulesReply, cancelledAny is ALSO true (because of its poller).
-      
-      (shellState.activeRl as any).line = '';
-      (shellState.activeRl as any).cursor = 0;
+    // Clear the current line buffer
+    (shellState.activeRl as any).line = '';
+    (shellState.activeRl as any).cursor = 0;
+    if (!(shellState.activeRl as any).closed) {
       (shellState.activeRl as any)._refreshLine();
+    }
 
-      // ONLY write \n if we are NOT in the middle of a polling task, 
-      // OR if we know for sure we are in a sub-prompt.
-      // Since we can't be sure, we'll rely on the escCancelled flag.
+    if (shellState.shellLineHandler) {
+      // In Shell mode: force a newline to break any active .question() 
+      // and let the shell loop take back control.
       shellState.activeRl.write('\n');
       cancelledAny = true;
     } else {
-      // Not in shell mode, just close the interface
-      shellState.activeRl.close();
+      // One-off command mode: just close and exit gracefully
+      if (!(shellState.activeRl as any).closed) {
+        shellState.activeRl.close();
+      }
       shellState.activeRl = null;
-      process.stdout.write('\n' + chalk.yellow('⚠ Input cancelled. Back to prompt.\n'));
+      process.stdout.write(chalk.yellow('\n⚠ Input cancelled.\n'));
       cancelledAny = true;
     }
   }
 
-  // Abort any pending API calls
-  shellState.abortController.abort();
-  // DO NOT replace shellState.abortController here. 
-  // Let showPrompt or the next command handler do it.
+  if (!cancelledAny) {
+    // If nothing was active, just ensure we show a fresh prompt
+    process.stdout.write('\n');
+    if (shellState.shellLineHandler) {
+      showPrompt();
+    }
+  }
 }
 
 // Enable raw keypress detection
@@ -593,11 +589,10 @@ shellState.trackedSessionUrl = null;
 let currentMode: 'fast' | 'plan' = 'fast';
 
 const isLongPaste = (text: string): boolean => {
-  if (text.includes('\n') || text.includes('\r')) {
-    return true;
-  }
+  const lineCount = text.split(/\r\n|\r|\n/).length;
   const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
-  return wordCount > 15 || text.length > 100;
+  // Only trigger placeholder for truly large blocks (e.g., > 10 lines or > 200 words)
+  return lineCount > 10 || wordCount > 200 || text.length > 2000;
 };
 
 function getWorkspaceStatus(): { isValid: boolean; error?: string; projectName?: string; isOutside?: boolean; wsRoot?: string } {
@@ -974,7 +969,8 @@ async function handleSync() {
 }
 
 async function promptJulesReply(cleanHeader: string, sessionId?: string): Promise<string> {
-  sessionAborted = false;
+  shellState.sessionAborted = false;
+  shellState.escCancelled = false;
   const localSignal = shellState.abortController.signal;
   const oldLineHandler = shellState.shellLineHandler;
   const oldKeypressHandler = shellState.keypressHandler;
@@ -1007,7 +1003,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
   
   if (sessionId) {
     const timer = setInterval(async () => {
-      if (escCancelled || localSignal.aborted || sessionAborted) {
+      if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
         clearInterval(timer);
         activeIntervals.delete(timer);
         if (activePollingTimer === timer) activePollingTimer = null;
@@ -1336,17 +1332,62 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
   rl.on('SIGINT', sigintHandler);
 
   return new Promise<string>((resolve) => {
-    const lineHandler = (line: string) => {
-      if (shellState.escCancelled || localSignal.aborted || sessionAborted) {
+    const lineHandler = async (line: string) => {
+      if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
         if (activePollingTimer) clearInterval(activePollingTimer!);
         resolve('');
         return;
       }
       clearReplyBottomAreaOnEnter();
       
-      const endsWithBackslash = line.endsWith('\\');
+      let substitutedLine = line;
+      let hadPlaceholders = false;
+      for (let i = 0; i < replyPastedBlocks.length; i++) {
+        const placeholderPattern = `[pasted text #${i + 1} [`;
+        const idx = substitutedLine.indexOf(placeholderPattern);
+        if (idx !== -1) {
+          const endIdx = substitutedLine.indexOf(']]', idx + placeholderPattern.length);
+          if (endIdx !== -1) {
+            const fullPlaceholder = substitutedLine.substring(idx, endIdx + 2);
+            substitutedLine = substitutedLine.replace(fullPlaceholder, replyPastedBlocks[i]);
+            hadPlaceholders = true;
+          }
+        }
+      }
+
+      if (hadPlaceholders) {
+        console.log(chalk.bold.yellow('\n📋 LARGE PASTE DETECTED - Please Review:'));
+        const divider = chalk.dim('─'.repeat(process.stdout.columns || 50));
+        console.log(divider);
+        const previewLines = substitutedLine.split('\n');
+        const maxPreview = 15;
+        previewLines.slice(0, maxPreview).forEach(l => console.log(chalk.gray(`  ${l}`)));
+        if (previewLines.length > maxPreview) {
+          console.log(chalk.dim(`  ... (${previewLines.length - maxPreview} more lines) ...`));
+        }
+        console.log(divider);
+
+        if (!(rl as any).closed) rl.pause();
+        const confirm = await askUser(chalk.cyan('Proceed with this input? (y/n): '));
+        if (!(rl as any).closed) rl.resume();
+
+        if (confirm.toLowerCase() !== 'y') {
+          replyPastedBlocks = [];
+          replyPasteCount = 0;
+          (rl as any).line = '';
+          (rl as any).cursor = 0;
+          (rl as any)._refreshLine();
+          rl.prompt();
+          return;
+        }
+      }
+
+      replyPastedBlocks = [];
+      replyPasteCount = 0;
+
+      const endsWithBackslash = substitutedLine.endsWith('\\');
       if (altEnterPressed || endsWithBackslash) {
-        const lineToPush = endsWithBackslash ? line.slice(0, -1) : line;
+        const lineToPush = endsWithBackslash ? substitutedLine.slice(0, -1) : substitutedLine;
         accumulatedLines.push(lineToPush);
         altEnterPressed = false;
         rl!.setPrompt('  ');
@@ -1517,13 +1558,15 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
     const now = new Date();
     const ts = `[${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}]`;
     
-    if (['IDLE', 'WAITING', 'COMPLETED', 'STOPPED', 'INACTIVE'].includes(s)) {
-      return chalk.bold.yellow(`⏸ Jules is idle / waiting for input ${chalk.dim(ts)}`);
+    if (['IDLE', 'WAITING', 'COMPLETED', 'STOPPED', 'INACTIVE', 'AWAITING_USER_FEEDBACK', 'PAUSED', 'HALTED', 'BLOCKED'].includes(s)) {
+      const displayState = s.replace(/_/g, ' ');
+      return chalk.bold.yellow(`⏸ Jules is ${displayState.toLowerCase()} ${chalk.dim(ts)}`);
     } else if (['ERROR', 'FAILED'].includes(s)) {
       return chalk.bold.red(`❌ Jules encountered an error ${chalk.dim(ts)}`);
     } else {
       const displayVerb = (verb && !['WORKING', 'ANALYZING', 'IN_PROGRESS', 'RUNNING'].includes(verb.toUpperCase())) ? verb : 'Analyzing';
-      return chalk.bold.cyan('⚡ Status: Working') + chalk.dim(' • ') + chalk.white(`${displayVerb} ${chalk.dim(ts)}`);
+      const displayStatus = (s === 'WORKING' || s === 'ANALYZING' || s === 'IN_PROGRESS' || s === 'RUNNING') ? 'Working' : s.replace(/_/g, ' ').toLowerCase();
+      return chalk.bold.cyan(`⚡ Status: ${displayStatus.charAt(0).toUpperCase() + displayStatus.slice(1)}`) + chalk.dim(' • ') + chalk.white(`${displayVerb} ${chalk.dim(ts)}`);
     }
   };
 
@@ -1564,7 +1607,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
   // step has set currentVerb. Once live status sync sets currentVerb to a
   // real step name, stop rotating and just keep refreshing that text.
   const timer = setInterval(() => {
-    if (escCancelled || localSignal.aborted || sessionAborted) {
+    if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
       clearInterval(timer);
       activeIntervals.delete(timer);
       if (activePollingTimer === timer) activePollingTimer = null;
@@ -1649,8 +1692,8 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
   let initialized = false;
 
   try {
-    while (!completed && !localSignal.aborted && !sessionAborted) {
-      if (shellState.escCancelled || localSignal.aborted || sessionAborted) {
+    while (!completed && !localSignal.aborted && !shellState.sessionAborted) {
+      if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
         if (spinner.isSpinning) spinner.stop();
         clearAllIntervals();
         logger.info('Aborting Jules task...');
@@ -1666,7 +1709,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
         const status = await getSessionStatus(sessionId, localSignal);
         currentState = status.state || status.status || 'WORKING';
         
-        if (['IDLE', 'WAITING', 'COMPLETED', 'STOPPED', 'INACTIVE'].includes(currentState.toUpperCase())) {
+        if (['IDLE', 'WAITING', 'COMPLETED', 'STOPPED', 'INACTIVE', 'AWAITING_USER_FEEDBACK', 'PAUSED', 'HALTED', 'BLOCKED'].includes(currentState.toUpperCase())) {
           idlePollCount++;
         } else {
           idlePollCount = 0;
@@ -1711,7 +1754,8 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
 
         // --- Bug 3: Detect Interrupt/Question ---
         const isInterrupt = status.requires_user_input === true || 
-                          ['question', 'interrupt', 'user_input_required'].includes(status.type?.toLowerCase());
+                          ['question', 'interrupt', 'user_input_required', 'awaiting_user_feedback', 'paused', 'halted', 'blocked'].includes(status.type?.toLowerCase() || '') ||
+                          ['awaiting_user_feedback', 'paused', 'halted', 'blocked', 'inactive'].includes(currentState.toLowerCase());
 
         if (isInterrupt) {
           if (spinner.isSpinning) spinner.stop();
@@ -1784,7 +1828,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           spinner.start(formatSpinnerText(currentVerb, currentState));
         }
         
-        if (shellState.escCancelled || localSignal.aborted || sessionAborted) {
+        if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
           if (spinner.isSpinning) spinner.stop();
           clearAllIntervals();
           logger.info('Aborting Jules task...');
@@ -1807,7 +1851,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           activities = await getSessionActivities(sessionId, localSignal);
           if (!initialized) {
             const isWaitingForInput = status.requires_user_input === true || 
-                                      ['inactive', 'question', 'interrupt', 'user_input_required', 'awaiting_user_feedback'].includes(status.state?.toLowerCase() || status.status?.toLowerCase() || status.type?.toLowerCase() || '');
+                                      ['inactive', 'question', 'interrupt', 'user_input_required', 'awaiting_user_feedback', 'paused', 'halted', 'blocked'].includes(status.state?.toLowerCase() || status.status?.toLowerCase() || status.type?.toLowerCase() || '');
             
             const agentMsgs = activities.filter((a: any) => a.agentMessaged?.agentMessage);
             
@@ -1875,7 +1919,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           }
         }
 
-        if (shellState.escCancelled || localSignal.aborted || sessionAborted) {
+        if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
           if (spinner.isSpinning) spinner.stop();
           clearAllIntervals();
           logger.info('Aborting Jules task...');
@@ -2229,7 +2273,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           await cancellableSleep(2000);
         }
       } catch (pollError: any) {
-        if (shellState.escCancelled || localSignal.aborted || sessionAborted) {
+        if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
           if (spinner.isSpinning) spinner.stop();
           clearAllIntervals();
           logger.info('Aborting Jules task...');
@@ -2295,8 +2339,8 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
 }
 
 async function handleEdit(instruction: string) {
-  sessionAborted = false;
-  escCancelled = false;
+  shellState.sessionAborted = false;
+  shellState.escCancelled = false;
   const localSignal = shellState.abortController.signal;
   await enforceWorkspace();
   validateEnv();
@@ -3090,6 +3134,7 @@ async function startShell() {
 
   const showPrompt = () => {
     shellState.escCancelled = false;
+    shellState.sessionAborted = false;
     shellState.abortController = new AbortController();
     if (shellState.isRestarting || (rl as any).closed) return;
 
@@ -3706,6 +3751,7 @@ async function startShell() {
     shellState.isBottomAreaRendered = false;
     
     let substitutedLine = fullLine;
+    let hadPlaceholders = false;
     for (let i = 0; i < shellPastedBlocks.length; i++) {
       const placeholderPattern = `[pasted text #${i + 1} [`;
       const idx = substitutedLine.indexOf(placeholderPattern);
@@ -3714,9 +3760,42 @@ async function startShell() {
         if (endIdx !== -1) {
           const fullPlaceholder = substitutedLine.substring(idx, endIdx + 2);
           substitutedLine = substitutedLine.replace(fullPlaceholder, shellPastedBlocks[i]);
+          hadPlaceholders = true;
         }
       }
     }
+
+    if (hadPlaceholders) {
+      console.log(chalk.bold.yellow('\n📋 LARGE PASTE DETECTED - Please Review:'));
+      const divider = chalk.dim('─'.repeat(process.stdout.columns || 50));
+      console.log(divider);
+      
+      // Print first 15 lines as preview
+      const previewLines = substitutedLine.split('\n');
+      const maxPreview = 15;
+      previewLines.slice(0, maxPreview).forEach(l => console.log(chalk.gray(`  ${l}`)));
+      
+      if (previewLines.length > maxPreview) {
+        console.log(chalk.dim(`  ... (${previewLines.length - maxPreview} more lines) ...`));
+      }
+      console.log(divider);
+
+      if (!(rl as any).closed) rl.pause();
+      const confirm = await askUser(chalk.cyan('Proceed with this input? (y/n): '));
+      if (!(rl as any).closed) rl.resume();
+
+      if (confirm.toLowerCase() !== 'y') {
+        shellPastedBlocks = [];
+        shellPasteCount = 0;
+        if (shellState.keypressHandler) {
+          process.stdin.prependListener('keypress', shellState.keypressHandler);
+        }
+        process.stdout.write('\u001b[?2004h');
+        showPrompt();
+        return;
+      }
+    }
+
     shellPastedBlocks = [];
     shellPasteCount = 0;
 
@@ -4089,13 +4168,12 @@ async function startShell() {
 
   function redrawUI() {
     const cols = process.stdout.columns || 80;
-    // Clear screen and scrollback buffer more thoroughly
-    process.stdout.write('\u001b[2J\u001b[3J\u001b[H');
     
-    printMascot(cols);
-    printAsciiTitle(cols);
-    printInfoPanel(cols);
-    printTips(cols);
+    // Move to top-left but don't clear the whole scrollback
+    process.stdout.write('\u001b[H');
+    
+    // Redraw the banner without clearing
+    printBanner(projectName, branch, currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl, true);
 
     activeBottomLines = 0; // Reset before drawing
     if (shellState.activeRl && !(shellState.activeRl as any).closed) {

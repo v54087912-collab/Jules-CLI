@@ -105,7 +105,8 @@ export async function printBanner(
   mode: string = 'FAST',
   shadowUrl: string | null = null,
   sessionId: string | null = null,
-  sessionUrl: string | null = null
+  sessionUrl: string | null = null,
+  skipClear: boolean = false
 ) {
   const cols = process.stdout.columns || 80;
   const purple = chalk.hex('#7C3AED');
@@ -148,8 +149,10 @@ export async function printBanner(
   }
 
   const draw = (frameIndex: number, isFinal: boolean = false) => {
-    // Clear screen and move to top
-    process.stdout.write('\u001b[H\u001b[J');
+    // Only clear if we aren't skipping it
+    if (!skipClear || !isFinal) {
+      process.stdout.write('\u001b[H\u001b[J');
+    }
 
     // 1. Center Octopus
     octopusBase.forEach(line => {
