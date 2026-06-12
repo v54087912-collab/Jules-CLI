@@ -5,9 +5,15 @@ import { config, logger } from './utils';
 const julesApi = axios.create({
   baseURL: config.JULES_API_URL,
   headers: {
-    'x-goog-api-key': config.JULES_API_KEY,
     'Content-Type': 'application/json',
   },
+});
+
+julesApi.interceptors.request.use(reqConfig => {
+  if (reqConfig.headers) {
+    reqConfig.headers['x-goog-api-key'] = config.JULES_API_KEY || '';
+  }
+  return reqConfig;
 });
 
 const octokit = new Octokit({ auth: config.GITHUB_TOKEN });
