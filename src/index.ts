@@ -3235,7 +3235,6 @@ async function startShell() {
   };
 
   const showPrompt = () => {
-    shellState.isTaskActive = false;
     shellState.escCancelled = false;
     shellState.sessionAborted = false;
     shellState.abortController = new AbortController();
@@ -3846,11 +3845,12 @@ async function startShell() {
       return;
     }
 
-    accumulatedLines.push(line);
-    const fullLine = accumulatedLines.join('\n');
-    accumulatedLines = [];
-    rl.setPrompt(chalk.bold.white(PROMPT_STR));
     shellState.isTaskActive = true;
+    try {
+      accumulatedLines.push(line);
+      const fullLine = accumulatedLines.join('\n');
+      accumulatedLines = [];
+      rl.setPrompt(chalk.bold.white(PROMPT_STR));
 
     if (shellState.keypressHandler) {
       process.stdin.removeListener('keypress', shellState.keypressHandler);
@@ -4266,26 +4266,20 @@ async function startShell() {
     }
     process.stdout.write('\u001b[?2004h');
     showPrompt();
+    } finally {
+      shellState.isTaskActive = false;
+    }
   };
 
   function redrawUI() {
-    const cols = process.stdout.columns || 80;
-    
-    if (!shellState.isTaskActive && !shellState.trackedSessionId) {
-      // Move to top-left but don't clear the whole scrollback
-      process.stdout.write('\u001b[H');
-      
-      // Redraw the banner without clearing and without animation
-      printBanner(projectName, branch, currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl, true, true);
+    if (shellState.isTaskActive) {
+      return;
     }
-
     activeBottomLines = 0; // Reset before drawing
     if (shellState.activeRl && !(shellState.activeRl as any).closed) {
       shellState.activeRl.prompt(true);
     }
-    if (!shellState.isTaskActive) {
-      drawBottomArea(activeMatches);
-    }
+    drawBottomArea(activeMatches);
   }
 
   let resizeTimer: NodeJS.Timeout | null = null;
