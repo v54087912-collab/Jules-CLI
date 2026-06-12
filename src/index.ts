@@ -2699,6 +2699,22 @@ async function handleEdit(instruction: string) {
     // Clean auth token from URL before passing to Jules API
     repoUrl = rawRemoteUrl.replace(/https:\/\/[^@]+@/, 'https://');
 
+    if (shellState.trackedSessionId) {
+      sessionId = shellState.trackedSessionId;
+      spinner = ora({
+        text: chalk.dim('Sending message to Jules…'),
+        spinner: 'dots',
+        color: 'white'
+      }).start();
+
+      await sendJulesMessage(sessionId, bridgedInstruction, localSignal);
+      spinner.stop();
+      logger.success(`Message sent to tracked session · ${chalk.dim(sessionId)}`);
+      
+      await trackJulesSession(sessionId, repoUrl);
+      return;
+    }
+
     // 4. Create Jules Session
     const branch = await getCurrentBranch();
     const match = repoUrl.match(/github\.com[\/:](.+?)\/(.+?)(\.git)?$/);
