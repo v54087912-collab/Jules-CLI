@@ -7,12 +7,37 @@ import chalk from 'chalk';
 import { parsePatch, formatPatch, applyPatch } from 'diff';
 import { validateEnv, logger, printBanner, askUser, shellState, closeAskUser, downloadFile, loadSettings, saveSettings, config, cancellableSleep } from './utils';
 import { initGit, syncLocalChanges, getRemoteUrl, setRemote, getCurrentBranch, isGitRepo, syncBranchAndPull } from './git';
-import { createShadowRepo, createJulesSession, getSessionStatus, getSessionActivities, sendJulesMessage, approveJulesPlan, listJulesSessions, deleteJulesSession, listUserRepos, createNewRepo } from './api';
+import { createShadowRepo, createJulesSession, getSessionStatus, getSessionActivities, sendJulesMessage as apiSendJulesMessage, approveJulesPlan, listJulesSessions, deleteJulesSession, listUserRepos, createNewRepo } from './api';
 import { applyChanges, CodeChange } from './patcher';
 import fs from 'fs';
 import { bridgePathsInText, restoreExternalMappedFiles } from './bridge';
 import { execSync, spawn } from 'child_process';
 import dotenv from 'dotenv';
+
+async function sendJulesMessage(sessionId: string, prompt: string, signal?: AbortSignal) {
+  await apiSendJulesMessage(sessionId, prompt, signal);
+  // Wait for the session state to transition to active (non-waiting, non-completed state)
+  // We check the status every 500ms, up to 5 seconds.
+  for (let i = 0; i < 10; i++) {
+    if (shellState.escCancelled || signal?.aborted || shellState.sessionAborted) {
+      break;
+    }
+    try {
+      const status = await getSessionStatus(sessionId, signal);
+      const state = (status.state || status.status || status.executionStatus?.state || '').toUpperCase();
+      const isWaitingOrComplete = [
+        'COMPLETED', 'SUCCEEDED', 'SUCCESS', 'FAILED', 'ERROR',
+        'IDLE', 'WAITING', 'STOPPED', 'INACTIVE', 'AWAITING_USER_FEEDBACK',
+        'AWAITING_USER_INPUT', 'AWAITING_INPUT', 'PAUSED', 'HALTED', 'BLOCKED'
+      ].includes(state) || status.requires_user_input === true || status.requiresUserInput === true;
+
+      if (!isWaitingOrComplete) {
+        break;
+      }
+    } catch (e) {}
+    await cancellableSleep(500);
+  }
+}
 
 // Ignore SIGHUP to prevent Termux from killing the process on minimize
 process.on('SIGHUP', () => {});
