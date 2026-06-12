@@ -1786,7 +1786,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
   let initialized = false;
 
   try {
-    while (!completed && !localSignal.aborted && !shellState.sessionAborted) {
+    while (!completed) {
       if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
         if (spinner.isSpinning) spinner.stop();
         clearAllIntervals();
@@ -2440,6 +2440,12 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
       shellState.activePollTimer = null;
     }
     
+    if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
+      try {
+        await deleteJulesSession(sessionId);
+      } catch (e) {}
+    }
+
     if (process.stdin.isTTY) {
       try { process.stdin.setRawMode(wasRaw); } catch (e) {}
     }
