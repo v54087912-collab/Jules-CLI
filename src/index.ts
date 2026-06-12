@@ -1792,7 +1792,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
         clearAllIntervals();
         logger.info('Aborting Jules task...');
         try {
-          await deleteJulesSession(sessionId, localSignal);
+          await deleteJulesSession(sessionId);
         } catch (e) {}
         logger.info('Task cancelled.');
         completed = true;
@@ -1937,7 +1937,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           clearAllIntervals();
           logger.info('Aborting Jules task...');
           try {
-            await deleteJulesSession(sessionId, localSignal);
+            await deleteJulesSession(sessionId);
           } catch (e) {}
           logger.info('Task cancelled.');
           completed = true;
@@ -2026,7 +2026,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           clearAllIntervals();
           logger.info('Aborting Jules task...');
           try {
-            await deleteJulesSession(sessionId, localSignal);
+            await deleteJulesSession(sessionId);
           } catch (e) {}
           logger.info('Task cancelled.');
           completed = true;
@@ -2380,7 +2380,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           clearAllIntervals();
           logger.info('Aborting Jules task...');
           try {
-            await deleteJulesSession(sessionId, localSignal);
+            await deleteJulesSession(sessionId);
           } catch (e) {}
           logger.info('Task cancelled.');
           completed = true;
