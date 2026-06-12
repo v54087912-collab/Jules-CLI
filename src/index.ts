@@ -1590,21 +1590,6 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
       resolve('');
     });
   });
-}async function waitForSessionToStart(sessionId: string, signal?: AbortSignal) {
-  const checkSpinner = ora({ text: chalk.dim('Waiting for Jules to start processing…'), spinner: 'dots', color: 'white' }).start();
-  try {
-    for (let i = 0; i < 5; i++) {
-      if (signal?.aborted) break;
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      if (signal?.aborted) break;
-      const status = await getSessionStatus(sessionId, signal);
-      const state = (status.state || status.status || status.executionStatus?.state || '').toUpperCase();
-      if (['WORKING', 'RUNNING', 'IN_PROGRESS', 'PENDING'].includes(state)) {
-        break;
-      }
-    }
-  } catch (e) {}
-  checkSpinner.stop();
 }
 
 export async function trackJulesSession(sessionId: string, repoUrl?: string, forceSync: boolean = false) {
@@ -1769,6 +1754,52 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
   // Initialize tracking state with existing activities to avoid blocking on old history
   try {
     const initialActivities = await getSessionActivities(sessionId, localSignal);
+    
+    // Print conversation history of the session on track startup
+    let sessionStatus: any = null;
+    try {
+      sessionStatus = await getSessionStatus(sessionId, localSignal);
+    } catch (e) {}
+
+    const conversation: string[] = [];
+    
+    // Prepend the starting prompt of the session
+    const startPrompt = sessionStatus?.prompt || sessionStatus?.prompt_message;
+    if (startPrompt) {
+      const cols = process.stdout.columns || 80;
+      const wrapWidth = Math.max(20, cols - 10);
+      const wrappedMsg = wrapText(startPrompt, wrapWidth, '          ');
+      conversation.push('\n' + chalk.bold.green('🧑 You: ') + chalk.white(wrappedMsg));
+    }
+
+    for (const act of initialActivities) {
+      const userMsg = act.userMessaged?.userMessage || act.userMessaged?.text || act.userMessaged?.prompt || act.userMessage;
+      if (userMsg && userMsg !== startPrompt) {
+        const cols = process.stdout.columns || 80;
+        const wrapWidth = Math.max(20, cols - 10);
+        const wrappedMsg = wrapText(userMsg, wrapWidth, '          ');
+        conversation.push('\n' + chalk.bold.green('🧑 You: ') + chalk.white(wrappedMsg));
+      }
+
+      const agentMsg = act.agentMessaged?.agentMessage || act.agentMessage;
+      if (agentMsg) {
+        const cols = process.stdout.columns || 80;
+        const wrapWidth = Math.max(20, cols - 10);
+        const wrappedMsg = wrapText(agentMsg, wrapWidth, '          ');
+        conversation.push('\n' + chalk.bold.white('💬 Jules: ') + chalk.white(wrappedMsg));
+        
+        // Add to printedAgentMessages to prevent duplication in real-time
+        if (act.id) printedAgentMessages.add(act.id);
+        if (act.name) printedAgentMessages.add(act.name);
+      }
+    }
+
+    if (conversation.length > 0) {
+      console.log(chalk.bold.white('💬 Conversation History:'));
+      console.log(chalk.dim('  ' + '─'.repeat(50)));
+      conversation.forEach(line => console.log(line));
+      console.log(chalk.dim('\n  ' + '─'.repeat(50) + '\n'));
+    }
     
     // Find if plan is already approved in history
     const isPlanAlreadyApproved = initialActivities.some((a: any) => 
@@ -1951,7 +1982,6 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           
           await sendJulesMessage(sessionId, bridgedReply, localSignal);
           msgSpinner.stop();
-          await waitForSessionToStart(sessionId, localSignal);
           logger.success('Message sent successfully. Resuming session...');
           
           idlePollCount = 0;
@@ -2023,7 +2053,6 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           const bridgedReply = bridgePathsInText(userReply);
           await sendJulesMessage(sessionId, bridgedReply, localSignal);
           msgSpinner.stop();
-          await waitForSessionToStart(sessionId, localSignal);
           
           console.log(chalk.bold.green('🧑 You: ') + chalk.white(userReply.trim()));
           console.log(chalk.dim('────────────────────────────────────\n'));
@@ -2262,7 +2291,6 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           
           await sendJulesMessage(sessionId, bridgedReply, localSignal);
           msgSpinner.stop();
-          await waitForSessionToStart(sessionId, localSignal);
           logger.success('Message sent successfully.');
 
           if (unrepliedActivity.id) repliedActivities.add(unrepliedActivity.id);
@@ -2613,7 +2641,6 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           
           await sendJulesMessage(sessionId, bridgedReply, localSignal);
           msgSpinner.stop();
-          await waitForSessionToStart(sessionId, localSignal);
           logger.success('Message sent successfully. Resuming session...');
           
           spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
@@ -2730,7 +2757,6 @@ async function handleEdit(instruction: string) {
       spinner.stop();
       logger.success(`Message sent to tracked session · ${chalk.dim(sessionId)}`);
       
-      await waitForSessionToStart(sessionId, localSignal);
       await trackJulesSession(sessionId, repoUrl);
       return;
     }
