@@ -1814,7 +1814,12 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           !approvedPlans.has(a.id)
         );
         
-        if (['IDLE', 'WAITING', 'COMPLETED', 'STOPPED', 'INACTIVE', 'AWAITING_USER_FEEDBACK', 'PAUSED', 'HALTED', 'BLOCKED'].includes(currentState.toUpperCase()) && !hasUnapprovedPlan) {
+        const isWaitingState = ['IDLE', 'WAITING', 'COMPLETED', 'STOPPED', 'INACTIVE', 'AWAITING_USER_FEEDBACK', 'AWAITING_USER_INPUT', 'AWAITING_INPUT', 'PAUSED', 'HALTED', 'BLOCKED'].includes(currentState.toUpperCase()) ||
+                               status.requires_user_input === true ||
+                               status.requiresUserInput === true ||
+                               (activities.length > 0 && activities[activities.length - 1].agentMessaged?.agentMessage);
+
+        if (isWaitingState && !hasUnapprovedPlan) {
           idlePollCount++;
         } else {
           idlePollCount = 0;
@@ -1860,8 +1865,10 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
         // --- Bug 3: Detect Interrupt/Question ---
         const isInterrupt = !hasUnapprovedPlan && (
           status.requires_user_input === true || 
-          ['question', 'interrupt', 'user_input_required', 'awaiting_user_feedback', 'paused', 'halted', 'blocked'].includes(status.type?.toLowerCase() || '') ||
-          ['awaiting_user_feedback', 'paused', 'halted', 'blocked', 'inactive'].includes(currentState.toLowerCase())
+          status.requiresUserInput === true ||
+          ['question', 'interrupt', 'user_input_required', 'awaiting_user_feedback', 'awaiting_user_input', 'awaiting_input', 'paused', 'halted', 'blocked'].includes(status.type?.toLowerCase() || '') ||
+          ['awaiting_user_feedback', 'awaiting_user_input', 'awaiting_input', 'paused', 'halted', 'blocked', 'inactive'].includes(currentState.toLowerCase()) ||
+          (activities.length > 0 && activities[activities.length - 1].agentMessaged?.agentMessage)
         );
 
         if (isInterrupt) {
@@ -1953,7 +1960,9 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
         try {
           if (!initialized) {
             const isWaitingForInput = status.requires_user_input === true || 
-                                      ['inactive', 'question', 'interrupt', 'user_input_required', 'awaiting_user_feedback', 'paused', 'halted', 'blocked'].includes(status.state?.toLowerCase() || status.status?.toLowerCase() || status.type?.toLowerCase() || '');
+                                      status.requiresUserInput === true ||
+                                      ['inactive', 'question', 'interrupt', 'user_input_required', 'awaiting_user_feedback', 'awaiting_user_input', 'awaiting_input', 'paused', 'halted', 'blocked'].includes(status.state?.toLowerCase() || status.status?.toLowerCase() || status.type?.toLowerCase() || '') ||
+                                      (activities.length > 0 && activities[activities.length - 1].agentMessaged?.agentMessage);
             
             const agentMsgs = activities.filter((a: any) => a.agentMessaged?.agentMessage);
             
