@@ -14,6 +14,7 @@ This guide provides everything you need to set up, configure, and master the Jul
 > cd "/data/data/com.termux/files/home/.gemini/antigravity-cli/scratch/Jules-CLI"
 > npm install --no-audit --no-fund --prefer-offline
 > npm run build
+> npm link
 > ```
 
 Ensure you are in the active project folder:
@@ -57,6 +58,10 @@ The CLI handles the heavy lifting automatically:
 2. **Navigate**: `cd "/storage/emulated/0/Jules-Workspace/my-project"`
 3. **Launch**:
    ```bash
+   # If globally linked (Recommended):
+   jules
+
+   # Otherwise, run via direct Node execution:
    # On Termux:
    node /data/data/com.termux/files/home/.gemini/antigravity-cli/scratch/Jules-CLI/dist/index.js
 

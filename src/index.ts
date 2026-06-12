@@ -1713,6 +1713,43 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
   const approvedPlans = new Set<string>();
   const downloadedMedia = new Set<string>();
   const printedAgentMessages = new Set<string>();
+  const printedMutations = new Set<string>();
+  let lastChecklistStateStr = '';
+
+  const checkAndRenderPlanChecklist = (steps: any[], currentStepIndex: number, completedStepIndices: Set<number>) => {
+    if (!steps || steps.length === 0) return;
+
+    const stateParts = steps.map((s, idx) => {
+      const isCompleted = completedStepIndices.has(idx);
+      const isActive = idx === currentStepIndex;
+      return `${idx}:${isCompleted ? 'C' : isActive ? 'A' : 'P'}`;
+    });
+    const stateStr = stateParts.join(',');
+
+    if (stateStr === lastChecklistStateStr) return;
+    lastChecklistStateStr = stateStr;
+
+    const wasSpinning = spinner.isSpinning;
+    if (wasSpinning) spinner.stop();
+
+    console.log(chalk.bold.white('\n📋 Task Plan Progress:'));
+    steps.forEach((s: any, idx: number) => {
+      const stepTitle = s.title || s.description || `Step ${idx + 1}`;
+      const isCompleted = completedStepIndices.has(idx);
+      const isActive = idx === currentStepIndex;
+
+      if (isCompleted) {
+        console.log(`  ${chalk.green('[✓]')} ${chalk.dim(stepTitle)}`);
+      } else if (isActive) {
+        console.log(`  ${chalk.cyan('[▸]')} ${chalk.bold.cyan(stepTitle)}`);
+      } else {
+        console.log(`  ${chalk.dim('[ ]')} ${chalk.white(stepTitle)}`);
+      }
+    });
+    console.log('');
+
+    if (wasSpinning) spinner.start(formatSpinnerText(currentVerb, currentState));
+  };
 
   // Initialize tracking state with existing activities to avoid blocking on old history
   try {
@@ -1754,8 +1791,8 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
         if (act.name) repliedActivities.add(act.name);
       }
 
-      if (act.name) seenActivities.add(act.name);
-      if (act.id) seenActivities.add(act.id);
+      const actKey = act.id || act.name;
+      if (actKey) seenActivities.add(actKey);
     }
   } catch (e) {
     // Initial fetch failed, main loop will retry
@@ -1801,12 +1838,59 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
 
       try {
         const status = await getSessionStatus(sessionId, localSignal);
-        currentState = status.state || status.status || 'WORKING';
+        currentState = status.state || status.status || status.executionStatus?.state || 'WORKING';
 
         let activities: any[] = [];
         try {
           activities = await getSessionActivities(sessionId, localSignal);
         } catch (e) {}
+
+        const planAct = activities.find(a => a.planGenerated?.plan);
+        if (planAct) {
+          const planSteps = planAct.planGenerated.plan.steps || [];
+          let currentStepIndex = -1;
+          const completedStepIndices = new Set<number>();
+
+          planSteps.forEach((s: any, idx: number) => {
+            const sState = (s.state || s.status || '').toUpperCase();
+            if (sState === 'COMPLETED' || sState === 'SUCCESS' || sState === 'SUCCEEDED') {
+              completedStepIndices.add(idx);
+            } else if (sState === 'RUNNING' || sState === 'IN_PROGRESS' || sState === 'ACTIVE') {
+              currentStepIndex = idx;
+            }
+          });
+
+          if (currentStepIndex === -1) {
+            for (let i = activities.length - 1; i >= 0; i--) {
+              const act = activities[i];
+              const actTitle = (act.progressUpdated?.title || '').toLowerCase();
+              const actDesc = (act.progressUpdated?.description || act.description || '').toLowerCase();
+              let foundMatch = false;
+              for (let idx = 0; idx < planSteps.length; idx++) {
+                const s = planSteps[idx];
+                const stepTitle = (s.title || '').toLowerCase();
+                const stepDesc = (s.description || '').toLowerCase();
+                if (
+                  (stepTitle && (actTitle.includes(stepTitle) || actDesc.includes(stepTitle))) ||
+                  (stepDesc && (actTitle.includes(stepDesc) || actDesc.includes(stepDesc)))
+                ) {
+                  currentStepIndex = idx;
+                  foundMatch = true;
+                  break;
+                }
+              }
+              if (foundMatch) break;
+            }
+          }
+
+          if (currentStepIndex >= 0) {
+            for (let i = 0; i < currentStepIndex; i++) {
+              completedStepIndices.add(i);
+            }
+          }
+
+          checkAndRenderPlanChecklist(planSteps, currentStepIndex, completedStepIndices);
+        }
 
         const hasUnapprovedPlan = activities.some((a: any) => 
           a.planGenerated?.plan && 
@@ -1931,11 +2015,12 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           continue; // Poll again immediately
         }
 
-        if (status.description && status.description !== lastStatusDescription) {
-          lastStatusDescription = status.description;
-          currentVerb = status.description;
+        const rawDesc = status.description || status.executionStatus?.description || status.currentOperation || status.executionStatus?.currentOperation || '';
+        if (rawDesc && rawDesc !== lastStatusDescription) {
+          lastStatusDescription = rawDesc;
+          currentVerb = rawDesc;
           if (spinner.isSpinning) spinner.stop();
-          logger.info(status.description);
+          logger.info(rawDesc);
           spinner.start(formatSpinnerText(currentVerb, currentState));
         }
         
@@ -1958,7 +2043,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
         }
 
         try {
-          if (!initialized) {
+          if (!initialized && activities.length > 0) {
             const isWaitingForInput = status.requires_user_input === true || 
                                       status.requiresUserInput === true ||
                                       ['inactive', 'question', 'interrupt', 'user_input_required', 'awaiting_user_feedback', 'awaiting_user_input', 'awaiting_input', 'paused', 'halted', 'blocked'].includes(status.state?.toLowerCase() || status.status?.toLowerCase() || status.type?.toLowerCase() || '') ||
@@ -1983,7 +2068,6 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
             const lastAgentMsg = agentMsgs[agentMsgs.length - 1];
             if (lastAgentMsg) {
               if (!isWaitingForInput) {
-                // If Jules isn't waiting, just mark it as seen/replied but maybe print it for context
                 if (lastAgentMsg.id) {
                   printedAgentMessages.add(lastAgentMsg.id);
                   repliedActivities.add(lastAgentMsg.id);
@@ -1997,31 +2081,104 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
                 const wrapWidth = Math.max(20, cols - 10);
                 const wrappedMsg = wrapText(lastAgentMsg.agentMessaged.agentMessage, wrapWidth, '          ');
                 console.log('\n' + chalk.bold.white('💬 Jules (Last Message): ') + chalk.dim(wrappedMsg));
-              } else {
-                // Jules IS waiting for input. 
-                // Do NOT mark it as replied. Do NOT mark it as printed yet.
-                // The loop below will find it and prompt the user.
               }
             }
 
-            // Manually print latest plan for context when tracking existing
-            const latestPlanAct = activities.slice().reverse().find(a => a.planGenerated?.plan);
-            if (latestPlanAct) {
-              console.log(chalk.bold.white('\n📋 Current Plan:'));
-              latestPlanAct.planGenerated.plan.steps.forEach((s: any) => {
-                const stepTitle = s.title || s.description || 'Step';
-                console.log(`  ${chalk.cyan('◇')} ${chalk.bold.white(stepTitle)}`);
-              });
-              approvedPlans.add(latestPlanAct.name);
-              if (latestPlanAct.id) approvedPlans.add(latestPlanAct.id);
-            }
-
-            console.log(chalk.bold.cyan('\n⚡ Status: ') + chalk.white(status.description || status.state || 'Working'));
-
+            // Cache all activities as seen during initialization
             for (const act of activities) {
-              if (act.name) seenActivities.add(act.name);
-              if (act.id) seenActivities.add(act.id);
+              const actKey = act.id || act.name;
+              if (actKey) seenActivities.add(actKey);
             }
+
+            // Print historical mutated files
+            const initialMutatedFiles = new Set<string>();
+            for (const act of activities) {
+              if (act.artifacts && Array.isArray(act.artifacts)) {
+                for (const art of act.artifacts) {
+                  let files: string[] = [];
+                  if (art.codeChanges?.files) {
+                    files = art.codeChanges.files.map((f: any) => f.path);
+                  } else if (art.changeSet?.gitPatch?.unidiffPatch) {
+                    try {
+                      const patches = parsePatch(art.changeSet.gitPatch.unidiffPatch);
+                      files = patches.map(p => {
+                        let filePath = p.newFileName || p.oldFileName || 'unknown';
+                        return filePath.replace(/^[ab]\//, '');
+                      });
+                    } catch (e) {}
+                  }
+                  for (const file of files) {
+                    if (file && file !== 'unknown') {
+                      initialMutatedFiles.add(file);
+                    }
+                  }
+                }
+              }
+            }
+            
+            if (initialMutatedFiles.size > 0) {
+              console.log(chalk.bold.white('📂 Modified files in session so far:'));
+              for (const file of initialMutatedFiles) {
+                const fullPath = path.join(process.cwd(), file);
+                const isCreated = !fs.existsSync(fullPath);
+                if (isCreated) {
+                  console.log(chalk.bold.green('  Created ') + chalk.white(file));
+                } else {
+                  console.log(chalk.bold.cyan('  Updated ') + chalk.white(file));
+                }
+                printedMutations.add(`${file}:${isCreated ? 'created' : 'updated'}`);
+              }
+              console.log('');
+            }
+
+            // Render initial plan checklist if plan exists
+            const latestPlanAct = activities.slice().reverse().find((a: any) => a.planGenerated?.plan);
+            if (latestPlanAct) {
+              const planSteps = latestPlanAct.planGenerated.plan.steps || [];
+              let currentStepIndex = -1;
+              const completedStepIndices = new Set<number>();
+
+              planSteps.forEach((s: any, idx: number) => {
+                const sState = (s.state || s.status || '').toUpperCase();
+                if (sState === 'COMPLETED' || sState === 'SUCCESS' || sState === 'SUCCEEDED') {
+                  completedStepIndices.add(idx);
+                } else if (sState === 'RUNNING' || sState === 'IN_PROGRESS' || sState === 'ACTIVE') {
+                  currentStepIndex = idx;
+                }
+              });
+
+              if (currentStepIndex === -1) {
+                for (let i = activities.length - 1; i >= 0; i--) {
+                  const act = activities[i];
+                  const actTitle = (act.progressUpdated?.title || '').toLowerCase();
+                  const actDesc = (act.progressUpdated?.description || act.description || '').toLowerCase();
+                  let foundMatch = false;
+                  for (let idx = 0; idx < planSteps.length; idx++) {
+                    const s = planSteps[idx];
+                    const stepTitle = (s.title || '').toLowerCase();
+                    const stepDesc = (s.description || '').toLowerCase();
+                    if (
+                      (stepTitle && (actTitle.includes(stepTitle) || actDesc.includes(stepTitle))) ||
+                      (stepDesc && (actTitle.includes(stepDesc) || actDesc.includes(stepDesc)))
+                    ) {
+                      currentStepIndex = idx;
+                      foundMatch = true;
+                      break;
+                    }
+                  }
+                  if (foundMatch) break;
+                }
+              }
+
+              if (currentStepIndex >= 0) {
+                for (let i = 0; i < currentStepIndex; i++) {
+                  completedStepIndices.add(i);
+                }
+              }
+
+              checkAndRenderPlanChecklist(planSteps, currentStepIndex, completedStepIndices);
+            }
+
             initialized = true;
           }
         } catch (actError: any) {
@@ -2097,6 +2254,9 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
         }
 
         for (const activity of activities) {
+          const actKey = activity.id || activity.name;
+          if (!actKey) continue;
+
           // --- Test Project Media Handling ---
           const promptText = status.prompt || '';
           if (promptText.toLowerCase().includes('test project')) {
@@ -2159,10 +2319,10 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           }
           // --- End Test Project Media Handling ---
 
-          if (!seenActivities.has(activity.name)) {
+          if (!seenActivities.has(actKey)) {
             // Plan Approval Block
-            if (activity.planGenerated?.plan && !approvedPlans.has(activity.name)) {
-              approvedPlans.add(activity.name);
+            if (activity.planGenerated?.plan && !approvedPlans.has(actKey)) {
+              approvedPlans.add(actKey);
               
               if (spinner.isSpinning) spinner.stop();
               
@@ -2177,16 +2337,12 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
               console.log('');
 
               const isAlreadyApproved = activities.some((a: any) => 
-                a.progressUpdated || 
-                a.description?.toLowerCase().includes('step') || 
                 a.planApproved
               );
 
               if (!isAlreadyApproved) {
                 let approvePlan = true;
                 if (currentMode === 'plan') {
-                  // Temporarily remove keypress cancel listener during prompt
-                  
                   if (process.stdin.isTTY) {
                     try { process.stdin.setRawMode(wasRaw); } catch (e) {}
                   }
@@ -2197,7 +2353,6 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
                     try { process.stdin.setRawMode(true); } catch (e) {}
                   }
                   process.stdin.resume();
-                  
 
                   if (approve.trim().toLowerCase() !== 'y') {
                     approvePlan = false;
@@ -2242,6 +2397,70 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
               spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
             }
 
+            // Output real-time file tree mutations directly into the console layout
+            const mutatedFiles = new Set<string>();
+            if (activity.artifacts && Array.isArray(activity.artifacts)) {
+              for (const art of activity.artifacts) {
+                let files: string[] = [];
+                if (art.codeChanges?.files) {
+                  files = art.codeChanges.files.map((f: any) => f.path);
+                } else if (art.changeSet?.gitPatch?.unidiffPatch) {
+                  try {
+                    const patches = parsePatch(art.changeSet.gitPatch.unidiffPatch);
+                    files = patches.map(p => {
+                      let filePath = p.newFileName || p.oldFileName || 'unknown';
+                      return filePath.replace(/^[ab]\//, '');
+                    });
+                  } catch (e) {}
+                }
+                for (const file of files) {
+                  if (file && file !== 'unknown') {
+                    mutatedFiles.add(file);
+                  }
+                }
+              }
+            }
+
+            const desc = (activity.description || '').toLowerCase();
+            const progDesc = (activity.progressUpdated?.description || '').toLowerCase();
+            const progTitle = (activity.progressUpdated?.title || '').toLowerCase();
+            
+            const fileRegexes = [
+              /(?:created|creating|updated|updating|wrote|writing|saved|saving|modified|modifying)\s+(?:file\s+)?([a-zA-Z0-9_\-\.\/\\~@]+)/gi,
+              /([a-zA-Z0-9_\-\.\/\\~@]+)\s+(?:has been|was)?\s*(?:created|updated|modified)/gi
+            ];
+            
+            for (const text of [desc, progDesc, progTitle]) {
+              if (!text) continue;
+              for (const regex of fileRegexes) {
+                let match;
+                while ((match = regex.exec(text)) !== null) {
+                  const filePath = match[1];
+                  if (filePath && (filePath.includes('.') || filePath.includes('/'))) {
+                    if (!filePath.startsWith('http') && !/^\d+$/.test(filePath) && filePath.length > 2) {
+                      mutatedFiles.add(filePath);
+                    }
+                  }
+                }
+              }
+            }
+
+            for (const file of mutatedFiles) {
+              const fullPath = path.join(process.cwd(), file);
+              const isCreated = !fs.existsSync(fullPath);
+              const mutationKey = `${file}:${isCreated ? 'created' : 'updated'}`;
+              if (!printedMutations.has(mutationKey)) {
+                printedMutations.add(mutationKey);
+                if (spinner.isSpinning) spinner.stop();
+                if (isCreated) {
+                  console.log(chalk.bold.green('  Created ') + chalk.white(file));
+                } else {
+                  console.log(chalk.bold.cyan('  Updated ') + chalk.white(file));
+                }
+                spinner.start(formatSpinnerText(currentVerb, currentState));
+              }
+            }
+
             // Detect step progress & print tool use
             if (activity.progressUpdated?.title || activity.progressUpdated?.description || activity.description) {
               const title = activity.progressUpdated?.title || '';
@@ -2253,7 +2472,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
               spinner.start(formatSpinnerText(currentVerb, currentState));
             }
             
-            seenActivities.add(activity.name);
+            seenActivities.add(actKey);
           }
         }
 

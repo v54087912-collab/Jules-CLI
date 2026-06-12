@@ -104,9 +104,22 @@ Jules operates inside a dedicated workspace: `/storage/emulated/0/Jules-Workspac
 
 ---
 
-### **3. Launch Jules**
+### **3. Link Command Globally (Recommended)**
+To run the CLI globally from any folder in your workspace by simply typing `jules`, run this command inside the project installation directory (`/data/data/com.termux/files/home/.gemini/antigravity-cli/scratch/Jules-CLI`):
+```bash
+npm link
+```
+*(Note: On other platforms, you may need to use `sudo npm link` depending on your global Node configuration).*
+
+---
+
+### **4. Launch Jules**
 Run the CLI from your project directory:
 ```bash
+# If globally linked (Recommended):
+jules
+
+# Alternatively, run via direct Node execution:
 # On Termux:
 node /data/data/com.termux/files/home/.gemini/antigravity-cli/scratch/Jules-CLI/dist/index.js
 
