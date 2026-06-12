@@ -1059,6 +1059,28 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
   }
 
   let liveStatus = '';
+  
+  if (sessionId) {
+    const timer = setInterval(async () => {
+      if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
+        clearInterval(timer);
+        activeIntervals.delete(timer);
+        if (activePollingTimer === timer) activePollingTimer = null;
+        return;
+      }
+      try {
+        const status = await getSessionStatus(sessionId, localSignal);
+        const newStatus = status.description || status.state || status.status || '';
+        if (newStatus && newStatus !== liveStatus) {
+          liveStatus = newStatus;
+          drawReplyBottomArea();
+        }
+      } catch (e) {}
+    }, 8000);
+    activeIntervals.add(timer);
+    activePollingTimer = timer;
+    shellState.activePollTimer = activePollingTimer;
+  }
 
   console.log(chalk.bold.white('\n' + cleanHeader));
   const cols = process.stdout.columns || 80;
@@ -1559,63 +1581,6 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
       }
     };
 
-    if (sessionId) {
-      const timer = setInterval(async () => {
-        if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
-          clearInterval(timer);
-          activeIntervals.delete(timer);
-          if (activePollingTimer === timer) activePollingTimer = null;
-          return;
-        }
-        try {
-          const status = await getSessionStatus(sessionId, localSignal);
-          const newStatus = status.description || status.state || status.status || '';
-          if (newStatus && newStatus !== liveStatus) {
-            liveStatus = newStatus;
-            drawReplyBottomArea();
-          }
-
-          const upperState = (status.state || status.status || status.executionStatus?.state || '').toUpperCase();
-          const isRunningOrFinished = ['WORKING', 'RUNNING', 'IN_PROGRESS', 'ACTIVE', 'COMPLETED', 'SUCCEEDED', 'SUCCESS'].includes(upperState);
-          const requiresInput = status.requires_user_input === true || status.requiresUserInput === true;
-          
-          if (isRunningOrFinished && !requiresInput) {
-            clearInterval(timer);
-            activeIntervals.delete(timer);
-            if (activePollingTimer === timer) activePollingTimer = null;
-
-            clearReplyBottomAreaOnEnter();
-            process.stdin.removeListener('keypress', keypressHandler);
-            rl!.off('SIGINT', sigintHandler);
-            rl!.off('line', lineHandler);
-            disableReplyBracketedPaste();
-            process.off('exit', disableReplyBracketedPaste);
-
-            if (tempRl) {
-              tempRl.close();
-              if (process.stdin.isTTY) {
-                try { process.stdin.setRawMode(false); } catch (e) {}
-              }
-            } else {
-              if (oldLineHandler) {
-                rl!.off('line', oldLineHandler);
-                rl!.on('line', oldLineHandler);
-              }
-              if (oldKeypressHandler) {
-                process.stdin.removeListener('keypress', oldKeypressHandler);
-                process.stdin.prependListener('keypress', oldKeypressHandler);
-              }
-            }
-            
-            resolve('__SESSION_RESUMED_BY_WEB__');
-          }
-        } catch (e) {}
-      }, 2000);
-      activeIntervals.add(timer);
-      activePollingTimer = timer;
-      shellState.activePollTimer = activePollingTimer;
-    }
-
     rl!.on('line', lineHandler);
     rl!.on('close', () => {
       if (activePollingTimer) {
@@ -1625,6 +1590,21 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
       resolve('');
     });
   });
+}async function waitForSessionToStart(sessionId: string, signal?: AbortSignal) {
+  const checkSpinner = ora({ text: chalk.dim('Waiting for Jules to start processing…'), spinner: 'dots', color: 'white' }).start();
+  try {
+    for (let i = 0; i < 5; i++) {
+      if (signal?.aborted) break;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      if (signal?.aborted) break;
+      const status = await getSessionStatus(sessionId, signal);
+      const state = (status.state || status.status || status.executionStatus?.state || '').toUpperCase();
+      if (['WORKING', 'RUNNING', 'IN_PROGRESS', 'PENDING'].includes(state)) {
+        break;
+      }
+    }
+  } catch (e) {}
+  checkSpinner.stop();
 }
 
 export async function trackJulesSession(sessionId: string, repoUrl?: string, forceSync: boolean = false) {
@@ -1797,50 +1777,19 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
       a.planApproved
     );
 
-    // Print chronological conversation history (both user and agent messages)
-    const conversation: { id: string, name: string, type: 'user' | 'agent', text: string }[] = [];
-    for (const act of initialActivities) {
-      const actId = act.id || '';
-      const actName = act.name || '';
-      
-      if (act.agentMessaged?.agentMessage) {
-        conversation.push({ id: actId, name: actName, type: 'agent', text: act.agentMessaged.agentMessage });
-      } else {
-        const userMsgText = act.userMessaged?.userMessage || act.userMessaged?.text || act.userMessaged?.prompt || act.userMessage;
-        if (userMsgText) {
-          conversation.push({ id: actId, name: actName, type: 'user', text: userMsgText });
-        }
-      }
-    }
-
-    if (conversation.length > 0) {
-      console.log(chalk.bold.white('💬 Conversation History:'));
-      for (const msg of conversation) {
-        const cols = process.stdout.columns || 80;
-        const wrapWidth = Math.max(20, cols - 10);
-        const wrappedMsg = wrapText(msg.text, wrapWidth, '          ');
-        if (msg.type === 'agent') {
-          console.log(chalk.bold.white('  💬 Jules: ') + chalk.white(wrappedMsg));
-        } else {
-          console.log(chalk.bold.green('  🧑 You:   ') + chalk.white(wrappedMsg));
-        }
-        if (msg.id) {
-          printedAgentMessages.add(msg.id);
-          repliedActivities.add(msg.id);
-        }
-        if (msg.name) {
-          printedAgentMessages.add(msg.name);
-          repliedActivities.add(msg.name);
-        }
-      }
-      console.log('');
-    }
+    // Find the last agent message activity
+    const agentMsgs = initialActivities.filter((a: any) => a.agentMessaged?.agentMessage);
+    const lastAgentMsg = agentMsgs[agentMsgs.length - 1];
 
     for (const act of initialActivities) {
       const isPlanGen = !!act.planGenerated;
-      
-      // Skip caching/marking as seen if it's the unapproved plan
+      const isLastMsg = lastAgentMsg && (act.id === lastAgentMsg.id || act.name === lastAgentMsg.name);
+
+      // Skip caching/marking as seen if it's the unapproved plan or the last active message
       if (isPlanGen && !isPlanAlreadyApproved) {
+        continue;
+      }
+      if (isLastMsg) {
         continue;
       }
 
@@ -1909,9 +1858,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
         let activities: any[] = [];
         try {
           activities = await getSessionActivities(sessionId, localSignal);
-        } catch (e: any) {
-          console.log("ACTIVITIES FETCH ERROR:", e.message, e.response?.data);
-        }
+        } catch (e) {}
 
         const planAct = activities.find(a => a.planGenerated?.plan);
         if (planAct) {
@@ -1998,18 +1945,13 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
             break;
           }
 
-          if (userReply === '__SESSION_RESUMED_BY_WEB__') {
-            console.log(chalk.bold.green('\n⚡ Session resumed in background/web.'));
-            spinner.start(formatSpinnerText(currentVerb, currentState));
-            continue;
-          }
-
           const msgSpinner = ora({ text: chalk.dim('Sending message to continue…'), spinner: 'dots', color: 'white' }).start();
           const bridgedReply = bridgePathsInText(userReply);
           await syncLocalChanges();
           
           await sendJulesMessage(sessionId, bridgedReply, localSignal);
           msgSpinner.stop();
+          await waitForSessionToStart(sessionId, localSignal);
           logger.success('Message sent successfully. Resuming session...');
           
           idlePollCount = 0;
@@ -2077,16 +2019,11 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
             break;
           }
 
-          if (userReply === '__SESSION_RESUMED_BY_WEB__') {
-            console.log(chalk.bold.green('\n⚡ Session resumed in background/web.'));
-            spinner.start(formatSpinnerText(currentVerb, currentState));
-            continue;
-          }
-
           const msgSpinner = ora({ text: chalk.dim('Sending response…'), spinner: 'dots', color: 'white' }).start();
           const bridgedReply = bridgePathsInText(userReply);
           await sendJulesMessage(sessionId, bridgedReply, localSignal);
           msgSpinner.stop();
+          await waitForSessionToStart(sessionId, localSignal);
           
           console.log(chalk.bold.green('🧑 You: ') + chalk.white(userReply.trim()));
           console.log(chalk.dim('────────────────────────────────────\n'));
@@ -2124,6 +2061,46 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
 
         try {
           if (!initialized && activities.length > 0) {
+            const isWaitingForInput = status.requires_user_input === true || 
+                                      status.requiresUserInput === true ||
+                                      ['inactive', 'question', 'interrupt', 'user_input_required', 'awaiting_user_feedback', 'awaiting_user_input', 'awaiting_input', 'paused', 'halted', 'blocked'].includes(status.state?.toLowerCase() || status.status?.toLowerCase() || status.type?.toLowerCase() || '') ||
+                                      (activities.length > 0 && activities[activities.length - 1].agentMessaged?.agentMessage);
+            
+            const agentMsgs = activities.filter((a: any) => a.agentMessaged?.agentMessage);
+            
+            // Mark older messages as replied
+            for (let i = 0; i < agentMsgs.length - 1; i++) {
+              const msg = agentMsgs[i];
+              if (msg.id) {
+                printedAgentMessages.add(msg.id);
+                repliedActivities.add(msg.id);
+              }
+              if (msg.name) {
+                printedAgentMessages.add(msg.name);
+                repliedActivities.add(msg.name);
+              }
+            }
+
+            // Handle the VERY last message specially
+            const lastAgentMsg = agentMsgs[agentMsgs.length - 1];
+            if (lastAgentMsg) {
+              if (!isWaitingForInput) {
+                if (lastAgentMsg.id) {
+                  printedAgentMessages.add(lastAgentMsg.id);
+                  repliedActivities.add(lastAgentMsg.id);
+                }
+                if (lastAgentMsg.name) {
+                  printedAgentMessages.add(lastAgentMsg.name);
+                  repliedActivities.add(lastAgentMsg.name);
+                }
+                
+                const cols = process.stdout.columns || 80;
+                const wrapWidth = Math.max(20, cols - 10);
+                const wrappedMsg = wrapText(lastAgentMsg.agentMessaged.agentMessage, wrapWidth, '          ');
+                console.log('\n' + chalk.bold.white('💬 Jules (Last Message): ') + chalk.dim(wrappedMsg));
+              }
+            }
+
             // Cache all activities as seen during initialization
             for (const act of activities) {
               const actKey = act.id || act.name;
@@ -2266,7 +2243,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
 
           clearAllIntervals();
 
-          const userReply = await promptJulesReply('Reply (or type /exit):', sessionId);
+          const userReply = await promptJulesReply('Reply (or type /exit):');
 
           if (process.stdin.isTTY) {
             try { process.stdin.setRawMode(true); } catch (e) {}
@@ -2279,18 +2256,13 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
             break;
           }
 
-          if (userReply === '__SESSION_RESUMED_BY_WEB__') {
-            console.log(chalk.bold.green('\n⚡ Session resumed in background/web.'));
-            spinner.start(formatSpinnerText(currentVerb, currentState));
-            continue;
-          }
-
           const msgSpinner = ora({ text: chalk.dim('Sending message…'), spinner: 'dots', color: 'white' }).start();
           const bridgedReply = bridgePathsInText(userReply);
           await syncLocalChanges();
           
           await sendJulesMessage(sessionId, bridgedReply, localSignal);
           msgSpinner.stop();
+          await waitForSessionToStart(sessionId, localSignal);
           logger.success('Message sent successfully.');
 
           if (unrepliedActivity.id) repliedActivities.add(unrepliedActivity.id);
@@ -2437,19 +2409,6 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
               spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
             }
 
-            // Print user messages in the activities feed
-            const userMsgText = activity.userMessaged?.userMessage || activity.userMessaged?.text || activity.userMessaged?.prompt || activity.userMessage;
-            if (userMsgText && !printedAgentMessages.has(activity.id) && !printedAgentMessages.has(activity.name)) {
-              if (spinner.isSpinning) spinner.stop();
-              const cols = process.stdout.columns || 80;
-              const wrapWidth = Math.max(20, cols - 10);
-              const wrappedMsg = wrapText(userMsgText, wrapWidth, '          ');
-              console.log('\n' + chalk.bold.green('🧑 You: ') + chalk.white(wrappedMsg));
-              if (activity.id) printedAgentMessages.add(activity.id);
-              if (activity.name) printedAgentMessages.add(activity.name);
-              spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
-            }
-
             if (activity.planApproved) {
               if (spinner.isSpinning) spinner.stop();
               logger.success('Plan approved 🎉');
@@ -2542,56 +2501,46 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           console.log('');
           logger.success('Task Completed!');
           
-          let outRepo = '';
-          let outBranch = '';
-          let compareUrl = '';
-          let sessionUrl = `https://jules.google.com/sessions/${sessionId}`;
-          let suggestedCommitMessage = '';
-          
           try {
             const finalSession = await getSessionStatus(sessionId, localSignal);
-            outRepo = finalSession.outputRepo || finalSession.executionStatus?.outputRepo;
-            outBranch = finalSession.outputBranch || finalSession.executionStatus?.outputBranch;
-            compareUrl = finalSession.compareUrl || finalSession.executionStatus?.compareUrl;
-            if (finalSession.outputs?.[0]?.changeSet?.gitPatch?.suggestedCommitMessage) {
-              suggestedCommitMessage = finalSession.outputs[0].changeSet.gitPatch.suggestedCommitMessage;
+            const outRepo = finalSession.outputRepo || finalSession.executionStatus?.outputRepo;
+            const outBranch = finalSession.outputBranch || finalSession.executionStatus?.outputBranch;
+            const compareUrl = finalSession.compareUrl || finalSession.executionStatus?.compareUrl;
+            const sessionUrl = `https://jules.google.com/sessions/${sessionId}`;
+
+            const divider = chalk.dim('  ' + '─'.repeat(50));
+            console.log(divider);
+            console.log(`  🆔 ${chalk.cyan('Session ID'.padEnd(13))} : ${chalk.white(sessionId)}`);
+            console.log(`  🌐 ${chalk.cyan('Session URL'.padEnd(13))} : ${chalk.yellow(sessionUrl)}`);
+            
+            if (outRepo && outBranch) {
+              console.log(`  📦 ${chalk.cyan('Output Repo'.padEnd(13))} : ${chalk.yellow.underline(outRepo)}`);
+              console.log(`  🌿 ${chalk.cyan('Output Branch'.padEnd(13))} : ${chalk.white(outBranch)}`);
+              if (compareUrl) {
+                console.log(`  🔗 ${chalk.cyan('View Changes'.padEnd(13))} : ${chalk.yellow.underline(compareUrl)}`);
+              }
+            } else {
+              console.log(chalk.yellow('  ⚠ Output repo info not available via API.'));
             }
-          } catch (e) {}
+            console.log(divider);
+            console.log(chalk.dim('  💡 Tip: Review changes on GitHub before merging.\n'));
+          } catch (e) {
+            console.log(chalk.yellow('  ⚠ Output repo info not available via API.'));
+          }
           
           const finalActivity = activities.find((a: any) => 
             a.artifacts?.some((art: any) => art.changeSet || art.codeChanges)
           );
 
-          let additions = 0;
-          let deletions = 0;
-          let changes: CodeChange[] = [];
-
           if (finalActivity) {
             const artifact = finalActivity.artifacts.find((art: any) => art.changeSet || art.codeChanges);
-            
-            if (artifact.changeSet?.gitPatch?.suggestedCommitMessage) {
-              suggestedCommitMessage = artifact.changeSet.gitPatch.suggestedCommitMessage;
-            }
+            let changes: CodeChange[] = [];
             
             if (artifact.codeChanges) {
               changes = artifact.codeChanges.files;
-              for (const file of changes) {
-                if (file.diff) {
-                  const lines = file.diff.split('\n');
-                  for (const line of lines) {
-                    if (line.startsWith('+') && !line.startsWith('+++')) additions++;
-                    else if (line.startsWith('-') && !line.startsWith('---')) deletions++;
-                  }
-                }
-              }
             } else if (artifact.changeSet) {
               const gitPatch = artifact.changeSet.gitPatch;
               if (gitPatch && gitPatch.unidiffPatch) {
-                 const lines = gitPatch.unidiffPatch.split('\n');
-                 for (const line of lines) {
-                   if (line.startsWith('+') && !line.startsWith('+++')) additions++;
-                   else if (line.startsWith('-') && !line.startsWith('---')) deletions++;
-                 }
                  const patches = parsePatch(gitPatch.unidiffPatch);
                  changes = patches.map(p => {
                    let filePath = p.newFileName || p.oldFileName || 'unknown';
@@ -2603,57 +2552,26 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
                  });
               }
             }
-          }
 
-          const divider = chalk.dim('  ' + '─'.repeat(50));
-          console.log(divider);
-          console.log(`  🆔 ${chalk.cyan('Session ID'.padEnd(13))} : ${chalk.white(sessionId)}`);
-          console.log(`  🌐 ${chalk.cyan('Session URL'.padEnd(13))} : ${chalk.yellow(sessionUrl)}`);
-          
-          if (outRepo && outBranch) {
-            console.log(`  📦 ${chalk.cyan('Output Repo'.padEnd(13))} : ${chalk.yellow.underline(outRepo)}`);
-            console.log(`  🌿 ${chalk.cyan('Output Branch'.padEnd(13))} : ${chalk.white(outBranch)}`);
-            if (compareUrl) {
-              console.log(`  🔗 ${chalk.cyan('View Changes'.padEnd(13))} : ${chalk.yellow.underline(compareUrl)}`);
-            }
-          } else {
-            console.log(chalk.yellow('  ⚠ Output repo info not available via API.'));
-          }
-          console.log(divider);
+            if (changes.length > 0) {
+              if (forceSync || shouldApplyChanges(sessionId)) {
+                const applied = await applyChanges(changes);
+                
+                // Save sync state
+                try {
+                  const branch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+                  execSync(`git fetch origin ${branch}`, { stdio: 'ignore' });
+                  const remoteCommit = execSync(`git rev-parse origin/${branch}`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+                  saveSyncState(remoteCommit, sessionId, changes.map(c => c.path), !applied);
+                } catch (e) {}
 
-          // Print Ready for Review banner if we have additions/deletions or commit message
-          if (additions > 0 || deletions > 0 || suggestedCommitMessage || outBranch) {
-            console.log(chalk.bold.green('Ready for review 🎉'));
-            console.log(chalk.bold.green(`+${additions}`) + ' ' + chalk.bold.red(`-${deletions}`));
-            if (outBranch) {
-              console.log(chalk.white(outBranch));
-            }
-            if (suggestedCommitMessage) {
-              console.log(chalk.white(suggestedCommitMessage));
-            }
-            console.log(divider);
-          }
-          
-          console.log(chalk.dim('  💡 Tip: Review changes on GitHub before merging.\n'));
-
-          if (finalActivity && changes.length > 0) {
-            if (forceSync || shouldApplyChanges(sessionId)) {
-              const applied = await applyChanges(changes);
-              
-              // Save sync state
-              try {
-                const branch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-                execSync(`git fetch origin ${branch}`, { stdio: 'ignore' });
-                const remoteCommit = execSync(`git rev-parse origin/${branch}`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-                saveSyncState(remoteCommit, sessionId, changes.map(c => c.path), !applied);
-              } catch (e) {}
-
-              if (applied) {
-                restoreExternalMappedFiles();
+                if (applied) {
+                  restoreExternalMappedFiles();
+                }
               }
+            } else {
+              logger.warn('No valid code changes found in the artifact.');
             }
-          } else if (finalActivity) {
-            logger.warn('No valid code changes found in the completed session.');
           } else {
             logger.warn('No code changes found in the completed session.');
           }
@@ -2676,7 +2594,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
 
           clearAllIntervals();
 
-          const userReply = await promptJulesReply('Chat to resume (or type /exit):', sessionId);
+          const userReply = await promptJulesReply('Chat to resume (or type /exit):');
 
           if (process.stdin.isTTY) {
             try { process.stdin.setRawMode(true); } catch (e) {}
@@ -2689,18 +2607,13 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
             break;
           }
 
-          if (userReply === '__SESSION_RESUMED_BY_WEB__') {
-            console.log(chalk.bold.green('\n⚡ Session resumed in background/web.'));
-            spinner.start(formatSpinnerText(currentVerb, currentState));
-            continue;
-          }
-
           const msgSpinner = ora({ text: chalk.dim('Sending message to resume…'), spinner: 'dots', color: 'white' }).start();
           const bridgedReply = bridgePathsInText(userReply);
           await syncLocalChanges();
           
           await sendJulesMessage(sessionId, bridgedReply, localSignal);
           msgSpinner.stop();
+          await waitForSessionToStart(sessionId, localSignal);
           logger.success('Message sent successfully. Resuming session...');
           
           spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
@@ -2817,6 +2730,7 @@ async function handleEdit(instruction: string) {
       spinner.stop();
       logger.success(`Message sent to tracked session · ${chalk.dim(sessionId)}`);
       
+      await waitForSessionToStart(sessionId, localSignal);
       await trackJulesSession(sessionId, repoUrl);
       return;
     }
