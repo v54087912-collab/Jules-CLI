@@ -77,9 +77,26 @@ export async function getSessionStatus(sessionId: string, signal?: AbortSignal) 
 }
 
 export async function getSessionActivities(sessionId: string, signal?: AbortSignal) {
-  const response = await julesApi.get(`/sessions/${sessionId}/activities`, { params: { t: Date.now() }, signal });
-  return response.data.activities || [];
+  let allActivities: any[] = [];
+  let pageToken = '';
+  while (true) {
+    const params: any = { t: Date.now() };
+    if (pageToken) {
+      params.pageToken = pageToken;
+    }
+    const response = await julesApi.get(`/sessions/${sessionId}/activities`, { params, signal });
+    const activities = response.data.activities || [];
+    allActivities = allActivities.concat(activities);
+    
+    const nextPageToken = response.data.nextPageToken;
+    if (!nextPageToken || nextPageToken === pageToken) {
+      break;
+    }
+    pageToken = nextPageToken;
+  }
+  return allActivities;
 }
+
 
 export async function sendJulesMessage(sessionId: string, prompt: string, signal?: AbortSignal) {
   const response = await julesApi.post(`/sessions/${sessionId}:sendMessage`, { prompt }, { signal });

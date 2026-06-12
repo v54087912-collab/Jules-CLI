@@ -211,11 +211,7 @@ function detectNewProjects(): string[] {
         }
       } catch (e) {}
 
-      // Specifically handle default-project as a container, not a project itself
-      if (entry.name === 'default-project') {
-        scanDir(fullPath, depth + 1);
-        continue;
-      }
+
 
       if (!fs.existsSync(markerPath) && !hasRemote) {
         // Only add if it's a project (has files) and not the workspace root itself
@@ -1891,7 +1887,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           activities = await getSessionActivities(sessionId, localSignal);
         } catch (e) {}
 
-        const planAct = activities.find(a => a.planGenerated?.plan);
+        const planAct = activities.slice().reverse().find(a => a.planGenerated?.plan);
         if (planAct) {
           const planSteps = planAct.planGenerated.plan.steps || [];
           let currentStepIndex = -1;
@@ -1993,7 +1989,8 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
         spinner.text = formatSpinnerText(currentVerb, currentState);
 
         // --- Bug 3: Detect Interrupt/Question ---
-        const isInterrupt = !hasUnapprovedPlan && (
+        const isCompleteState = ['COMPLETED', 'SUCCEEDED', 'SUCCESS'].includes(currentState.toUpperCase());
+        const isInterrupt = !isCompleteState && !hasUnapprovedPlan && (
           status.requires_user_input === true || 
           status.requiresUserInput === true ||
           ['question', 'interrupt', 'user_input_required', 'awaiting_user_feedback', 'awaiting_user_input', 'awaiting_input', 'paused', 'halted', 'blocked'].includes(status.type?.toLowerCase() || '') ||
@@ -2246,7 +2243,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
         }
 
         // Check if there are any unreplied agent messages
-        const unrepliedActivity = activities.find((a: any) => 
+        const unrepliedActivity = !isCompleteState && activities.find((a: any) => 
           a.agentMessaged?.agentMessage && 
           !repliedActivities.has(a.id) && 
           !repliedActivities.has(a.name)
