@@ -18,7 +18,7 @@ async function main() {
     let outRepo = '';
     let outBranch = '';
     let compareUrl = '';
-    let sessionUrl = `https://jules.google.com/sessions/${sessionId}`;
+    let sessionUrl = `https://jules.google.com/session/${sessionId}`;
     let suggestedCommitMessage = '';
     
     outRepo = status.outputRepo || status.executionStatus?.outputRepo;

@@ -11,7 +11,7 @@ import { createShadowRepo, createJulesSession, getSessionStatus, getSessionActiv
 import { applyChanges, CodeChange } from './patcher';
 import fs from 'fs';
 import { bridgePathsInText, restoreExternalMappedFiles } from './bridge';
-import { execSync } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import dotenv from 'dotenv';
 
 // Ignore SIGHUP to prevent Termux from killing the process on minimize
@@ -1312,7 +1312,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
       const line = rl!.line;
       let newMatches: string[] = [];
       if (line.startsWith('/')) {
-        newMatches = ['/init', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/help', '/docs', '/shot', '/exit'].filter(c => c.startsWith(line));
+        newMatches = ['/init', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/diff', '/revert', '/help', '/docs', '/shot', '/exit'].filter(c => c.startsWith(line));
         if (newMatches.length > 0 && line === newMatches[0]) {
           newMatches = [];
         }
@@ -1411,6 +1411,24 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
           drawReplyBottomArea();
           return;
         }
+        if (baseCmd === '/diff') {
+          const args = line.trim().split(' ').slice(1);
+          if (!(rl as any).closed) rl!.pause();
+          await handleDiffCommand(args);
+          if (!(rl as any).closed) rl!.resume();
+          if (!(rl as any).closed) rl!.prompt();
+          drawReplyBottomArea();
+          return;
+        }
+        if (baseCmd === '/revert') {
+          const args = line.trim().split(' ').slice(1);
+          if (!(rl as any).closed) rl!.pause();
+          await handleRevertCommand(args);
+          if (!(rl as any).closed) rl!.resume();
+          if (!(rl as any).closed) rl!.prompt();
+          drawReplyBottomArea();
+          return;
+        }
         if (cmd === '/shot') {
           handleShortcutsCommand();
           if (!(rl as any).closed) rl!.prompt();
@@ -1433,6 +1451,8 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
           console.log('');
           console.log(chalk.bold.white('  Commands inside Reply Mode:'));
           console.log(`    ${chalk.bold.cyan('/clear'.padEnd(28))} ${chalk.dim('Clear terminal')}`);
+          console.log(`    ${chalk.bold.cyan('/diff [args]'.padEnd(28))} ${chalk.dim('Show git diff of changes')}`);
+          console.log(`    ${chalk.bold.cyan('/revert [args]'.padEnd(28))} ${chalk.dim('Undo last Jules action/commit')}`);
           console.log(`    ${chalk.bold.cyan('/docs'.padEnd(28))} ${chalk.dim('Show documentation manual')}`);
           console.log(`    ${chalk.bold.cyan('/shot'.padEnd(28))} ${chalk.dim('Show keyboard shortcuts manual')}`);
           console.log(`    ${chalk.bold.cyan('/usage'.padEnd(28))} ${chalk.dim("Show today's stats & summary")}`);
@@ -1532,7 +1552,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
     'Deciphering'
   ];
 
-  const sessionUrl = `https://jules.google.com/sessions/${sessionId}`;
+  const sessionUrl = `https://jules.google.com/session/${sessionId}`;
   
   console.log(chalk.dim('\n── Synced with Jules Web Session ──'));
   console.log(`🆔 ${chalk.cyan('Session ID'.padEnd(11))} : ${chalk.white(sessionId)}`);
@@ -2158,7 +2178,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
             const outRepo = finalSession.outputRepo || finalSession.executionStatus?.outputRepo;
             const outBranch = finalSession.outputBranch || finalSession.executionStatus?.outputBranch;
             const compareUrl = finalSession.compareUrl || finalSession.executionStatus?.compareUrl;
-            const sessionUrl = `https://jules.google.com/sessions/${sessionId}`;
+            const sessionUrl = `https://jules.google.com/session/${sessionId}`;
 
             const divider = chalk.dim('  ' + '─'.repeat(50));
             console.log(divider);
@@ -2755,7 +2775,7 @@ async function handleSessionCommand(args: string[]) {
       validateSpinner.stop();
       
       shellState.trackedSessionId = sessionId;
-      const sessionUrl = `https://jules.google.com/sessions/${sessionId}`;
+      const sessionUrl = `https://jules.google.com/session/${sessionId}`;
       shellState.trackedSessionUrl = sessionUrl;
       saveSettings({ trackedSessionId: sessionId, trackedSessionUrl: sessionUrl });
       logger.success(`Now tracking session: ${sessionId}`);
@@ -2777,6 +2797,268 @@ async function handleSessionCommand(args: string[]) {
     logger.success('Stopped tracking session.');
   } else {
     logger.error('Usage: /session [list|delete|track|untrack] [sessionId]');
+  }
+}
+
+function printWithPager(text: string) {
+  const linesCount = text.split('\n').length;
+  const terminalRows = process.stdout.rows || 24;
+
+  if (linesCount > terminalRows && process.stdout.isTTY) {
+    const pager = spawn('less', ['-R', '-F', '-X'], {
+      stdio: ['pipe', 'inherit', 'inherit']
+    });
+    pager.on('error', () => {
+      console.log(text);
+    });
+    try {
+      pager.stdin.write(text);
+      pager.stdin.end();
+    } catch (e) {
+      console.log(text);
+    }
+  } else {
+    console.log(text);
+  }
+}
+
+async function handleDiffCommand(args: string[]) {
+  try {
+    const isStaged = args.includes('--staged');
+    const isSummary = args.includes('--summary');
+    
+    const fileArgs = args.filter(arg => !arg.startsWith('-'));
+    const filePath = fileArgs[0];
+
+    if (!(await isGitRepo())) {
+      logger.error('Not a git repository.');
+      return;
+    }
+
+    const branch = await getCurrentBranch() || 'main';
+    
+    try {
+      execSync(`git fetch origin ${branch}`, { stdio: 'ignore' });
+    } catch (e) {}
+
+    let baseRef = 'HEAD';
+    if (!isStaged) {
+      try {
+        const remoteCommit = execSync(`git rev-parse origin/${branch}`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+        if (remoteCommit) {
+          baseRef = remoteCommit;
+        }
+      } catch (e) {
+        baseRef = 'HEAD';
+      }
+    }
+
+    let gitArgs = ['diff'];
+    if (isStaged) {
+      gitArgs.push('--staged');
+    } else {
+      gitArgs.push(baseRef);
+    }
+
+    if (isSummary) {
+      gitArgs.push('--stat');
+    }
+
+    if (filePath) {
+      gitArgs.push('--', filePath);
+    }
+
+    let diffOutput = '';
+    try {
+      diffOutput = execSync(`git ${gitArgs.join(' ')}`, { stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 10 * 1024 * 1024 }).toString();
+    } catch (e) {}
+
+    if (!diffOutput.trim() && !isStaged && !filePath) {
+      try {
+        execSync('git rev-parse HEAD~1', { stdio: 'ignore' });
+        gitArgs = ['diff', 'HEAD~1', 'HEAD'];
+        if (isSummary) {
+          gitArgs.push('--stat');
+        }
+        diffOutput = execSync(`git ${gitArgs.join(' ')}`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+        console.log(chalk.cyan('ℹ No uncommitted or remote changes. Showing diff of last commit (HEAD~1 vs HEAD):\n'));
+      } catch (e) {}
+    }
+
+    if (!diffOutput.trim()) {
+      console.log(chalk.green('✓ No changes found.'));
+      return;
+    }
+
+    if (isSummary) {
+      let formattedSummary = '';
+      const lines = diffOutput.split('\n');
+      for (const line of lines) {
+        if (line.includes('|')) {
+          const parts = line.split('|');
+          const file = parts[0].trim();
+          const stats = parts[1];
+          formattedSummary += `  📂 ${chalk.cyan(file.padEnd(30))} |${stats}\n`;
+        } else if (line.includes('changed') || line.includes('insertions') || line.includes('deletions')) {
+          formattedSummary += `\n  ${chalk.bold(line.trim())}\n`;
+        } else {
+          formattedSummary += `  ${line}\n`;
+        }
+      }
+      printWithPager(formattedSummary);
+      return;
+    }
+
+    let formattedDiff = '';
+    const lines = diffOutput.split('\n');
+    const cols = process.stdout.columns || 80;
+    const divider = chalk.dim('─'.repeat(Math.min(cols - 2, 50)));
+
+    for (const line of lines) {
+      if (line.startsWith('diff --git ')) {
+        const match = line.match(/b\/(.+)$/);
+        const file = match ? match[1] : 'unknown';
+        formattedDiff += `\n📂 ${chalk.bold.cyan(file)}\n${divider}\n`;
+      } else if (line.startsWith('index ') || line.startsWith('--- ') || line.startsWith('+++ ')) {
+        continue;
+      } else if (line.startsWith('@@ ')) {
+        formattedDiff += `${chalk.magenta(line)}\n`;
+      } else if (line.startsWith('+')) {
+        formattedDiff += `${chalk.green(line)}\n`;
+      } else if (line.startsWith('-')) {
+        formattedDiff += `${chalk.red(line)}\n`;
+      } else {
+        formattedDiff += `${chalk.gray(line)}\n`;
+      }
+    }
+
+    printWithPager(formattedDiff);
+  } catch (err: any) {
+    logger.error(`Failed to show diff: ${err.message}`);
+  }
+}
+
+async function handleRevertCommand(args: string[]) {
+  try {
+    const isHard = args.includes('--hard');
+    const isPush = args.includes('--push');
+    const isList = args.includes('--list');
+
+    let steps = 1;
+    for (const arg of args) {
+      if (!arg.startsWith('-') && /^\d+$/.test(arg)) {
+        steps = parseInt(arg, 10);
+        break;
+      }
+    }
+
+    if (!(await isGitRepo())) {
+      logger.error('Not a git repository.');
+      return;
+    }
+
+    const branch = await getCurrentBranch() || 'main';
+
+    let logOutput = '';
+    try {
+      logOutput = execSync(`git log --pretty=format:"%H|%an|%ad|%s" --date=short -n 100`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+    } catch (e) {
+      logger.error('Failed to read git log.');
+      return;
+    }
+
+    const allCommits = logOutput.split('\n').filter(Boolean).map(line => {
+      const [sha, author, date, message] = line.split('|');
+      return { sha, author, date, message };
+    });
+
+    const julesCommits = allCommits.filter(c => {
+      const isJulesAuthor = c.author.toLowerCase().includes('jules') || c.author.toLowerCase().includes('collab');
+      const isJulesMsg = c.message.toLowerCase().includes('jules');
+      return isJulesAuthor || isJulesMsg;
+    });
+
+    if (isList) {
+      if (julesCommits.length === 0) {
+        console.log(chalk.yellow('No revertable Jules commits found.'));
+        return;
+      }
+      console.log(chalk.bold.white('\n⏪ Revertable Jules Actions:'));
+      console.log(chalk.dim('  ' + '─'.repeat(50)));
+      julesCommits.slice(0, 10).forEach((c, idx) => {
+        console.log(`  [${idx + 1}] ${chalk.cyan(c.sha.slice(0, 7))} (${c.date}) — ${chalk.white(c.message)}`);
+      });
+      console.log('');
+      return;
+    }
+
+    if (julesCommits.length === 0) {
+      logger.error('No Jules commits found to revert.');
+      return;
+    }
+
+    if (julesCommits.length < steps) {
+      logger.error(`Cannot revert ${steps} steps. Only ${julesCommits.length} Jules commit(s) exist.`);
+      return;
+    }
+
+    const isDirty = execSync('git status --porcelain', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    if (isDirty && !isHard) {
+      logger.error('Working tree has uncommitted changes. Please commit, stash, or use /revert --hard.');
+      return;
+    }
+
+    const commitsToRevert = julesCommits.slice(0, steps);
+
+    console.log(chalk.bold.yellow(`\n⏪ Reverting last ${steps} Jules action(s)...`));
+    commitsToRevert.forEach(c => {
+      console.log(`   SHA: ${chalk.cyan(c.sha.slice(0, 7))} — "${chalk.white(c.message)}"`);
+    });
+    console.log('');
+
+    let filesChanged: string[] = [];
+
+    if (isHard) {
+      const nthJulesCommit = julesCommits[steps - 1];
+      const idx = allCommits.findIndex(c => c.sha === nthJulesCommit.sha);
+      if (idx === -1 || idx + 1 >= allCommits.length) {
+        logger.error('Cannot perform hard reset: no base commit found before the target Jules commit.');
+        return;
+      }
+      const targetCommit = allCommits[idx + 1];
+      
+      try {
+        filesChanged = execSync(`git diff --name-only ${targetCommit.sha} HEAD`, { stdio: ['ignore', 'pipe', 'ignore'] })
+          .toString().split('\n').filter(Boolean);
+      } catch (e) {}
+
+      execSync(`git reset --hard ${targetCommit.sha}`, { stdio: 'ignore' });
+    } else {
+      for (const c of commitsToRevert) {
+        execSync(`git revert --no-edit ${c.sha}`, { stdio: 'ignore' });
+      }
+      try {
+        filesChanged = execSync(`git diff-tree --no-commit-id --name-only -r HEAD~${steps} HEAD`, { stdio: ['ignore', 'pipe', 'ignore'] })
+          .toString().split('\n').filter(Boolean);
+      } catch (e) {}
+    }
+
+    if (isPush) {
+      console.log(chalk.dim('Pushing changes to GitHub...'));
+      execSync(`git push origin ${branch} --force`, { stdio: 'ignore' });
+    }
+
+    console.log(chalk.bold.green('✅ Reverted successfully!'));
+    if (filesChanged.length > 0) {
+      console.log(chalk.white('   Files restored/modified:'));
+      filesChanged.slice(0, 10).forEach(f => console.log(`     - ${f}`));
+      if (filesChanged.length > 10) {
+        console.log(`     ...and ${filesChanged.length - 10} more`);
+      }
+    }
+    console.log(chalk.dim('\n   Tip: Use /diff to verify current state\n'));
+  } catch (err: any) {
+    logger.error(`Revert failed: ${err.message}`);
   }
 }
 
@@ -2958,7 +3240,7 @@ async function startShell() {
   console.log(chalk.white('  1. Run ') + chalk.bold.cyan('/init') + chalk.white(' to link this directory to a shadow repository'));
   console.log(chalk.white('  2. Type your coding instruction and press ') + chalk.bold('Enter') + chalk.white(' to edit files\n'));
 
-  const commandsList = ['/init', '/newrepo', '/repo', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/help', '/docs', '/shot', '/deleteworkspace', '/exit'];
+  const commandsList = ['/init', '/newrepo', '/repo', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/diff', '/revert', '/help', '/docs', '/shot', '/deleteworkspace', '/exit'];
 
   const PROMPT_STR = '> ';
   const PROMPT_LEN = PROMPT_STR.length;
@@ -4129,6 +4411,8 @@ async function startShell() {
           cmd('/shot',                   'Show keyboard shortcuts manual');
           cmd('/deleteworkspace',        'Delete workspace and restart');
           cmd('/clear',                  'Clear terminal');
+          cmd('/diff [args]',            'Show git diff of changes');
+          cmd('/revert [args]',          'Undo last Jules action/commit');
           cmd('/help',                   'Show this menu');
           cmd('/exit',                   'Quit');
           console.log('');
@@ -4146,6 +4430,25 @@ async function startShell() {
           break;
         case '/clear':
           console.clear();
+          branch = await getCurrentBranch() || 'main';
+          shadowUrl = await getRemoteUrl();
+          await printBanner(projectName, branch, currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl, false, true);
+          break;
+        case '/diff':
+          try {
+            if (!(rl as any).closed) rl.pause();
+            await handleDiffCommand(args);
+          } finally {
+            if (!(rl as any).closed) rl.resume();
+          }
+          break;
+        case '/revert':
+          try {
+            if (!(rl as any).closed) rl.pause();
+            await handleRevertCommand(args);
+          } finally {
+            if (!(rl as any).closed) rl.resume();
+          }
           break;
         case '/exit':
         case '/quit':
@@ -4281,6 +4584,22 @@ program
   .command('usage')
   .description("Show today's session count and all-time summary")
   .action(handleUsageCommand);
+
+program
+  .command('diff [args...]')
+  .allowUnknownOption()
+  .description('Show git diff of changes')
+  .action(async (args) => {
+    await handleDiffCommand(args || []);
+  });
+
+program
+  .command('revert [args...]')
+  .allowUnknownOption()
+  .description('Undo last Jules action/commit')
+  .action(async (args) => {
+    await handleRevertCommand(args || []);
+  });
 
 program
   .command('session <action> [sessionId]')
