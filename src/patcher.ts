@@ -66,11 +66,14 @@ export async function applyChanges(changes: CodeChange[]): Promise<boolean> {
       }
 
       // Handle new file creation if the patch is for a new file
-      const patchedContent = applyPatch(currentContent, change.diff);
+      const patches = parsePatch(change.diff);
+      const isNewFile = patches.length > 0 && patches[0].oldFileName === '/dev/null';
+      const sourceContent = isNewFile ? '' : currentContent;
+
+      const patchedContent = applyPatch(sourceContent, change.diff);
       
       if (patchedContent === false) {
-        const patches = parsePatch(change.diff);
-        if (patches.length > 0 && patches[0].oldFileName === '/dev/null') {
+        if (isNewFile && patches.length > 0) {
            let newContent = '';
            patches[0].hunks.forEach(hunk => {
              hunk.lines.forEach(line => {

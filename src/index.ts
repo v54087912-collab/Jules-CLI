@@ -4,7 +4,7 @@ import ora from 'ora';
 import path from 'path';
 import readline from 'readline';
 import chalk from 'chalk';
-import { parsePatch, formatPatch } from 'diff';
+import { parsePatch, formatPatch, applyPatch } from 'diff';
 import { validateEnv, logger, printBanner, askUser, shellState, closeAskUser, downloadFile, loadSettings, saveSettings, config, cancellableSleep } from './utils';
 import { initGit, syncLocalChanges, getRemoteUrl, setRemote, getCurrentBranch, isGitRepo, syncBranchAndPull } from './git';
 import { createShadowRepo, createJulesSession, getSessionStatus, getSessionActivities, sendJulesMessage, approveJulesPlan, listJulesSessions, deleteJulesSession, listUserRepos, createNewRepo } from './api';
@@ -57,7 +57,35 @@ function saveSyncState(commitHash: string, sessionId: string, appliedFiles: stri
   }
 }
 
-function shouldApplyChanges(sessionId: string): boolean {
+function reverseUnidiff(diffText: string): string {
+  const lines = diffText.split('\n');
+  const reversedLines: string[] = [];
+  
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.startsWith('--- ') && i + 1 < lines.length && lines[i + 1].startsWith('+++ ')) {
+      // Swap the headers and their prefixes
+      const oldHeader = line;
+      const newHeader = lines[i + 1];
+      reversedLines.push('--- ' + newHeader.slice(4));
+      reversedLines.push('+++ ' + oldHeader.slice(4));
+      i += 2;
+    } else {
+      if (line.startsWith('+') && !line.startsWith('+++')) {
+        reversedLines.push('-' + line.slice(1));
+      } else if (line.startsWith('-') && !line.startsWith('---')) {
+        reversedLines.push('+' + line.slice(1));
+      } else {
+        reversedLines.push(line);
+      }
+      i++;
+    }
+  }
+  return reversedLines.join('\n');
+}
+
+function shouldApplyChanges(sessionId: string, changes: CodeChange[]): boolean {
   // Read local sync state
   let lastSyncedCommit: string | null = null;
   let lastSyncedAt: string | null = null;
@@ -68,15 +96,12 @@ function shouldApplyChanges(sessionId: string): boolean {
       lastSyncedCommit = state.lastSyncedCommit;
       lastSyncedAt = state.lastSyncedAt;
       lastSessionId = state.sessionId;
-    } else {
-      // No sync state file = first time = apply changes
-      return true;
     }
   } catch {
-    return true;
+    // Continue
   }
 
-  // Get current remote commit
+  // Get current remote commit & check using git diff
   try {
     const branch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
     // Fetch latest to ensure we see Jules' commits
@@ -92,6 +117,18 @@ function shouldApplyChanges(sessionId: string): boolean {
       return false; // skip diff prompt
     }
 
+    // Attempt fast git diff check if possible
+    try {
+      execSync(`git diff --quiet origin/${branch}`, { stdio: 'ignore' });
+      console.log(chalk.green('✓ Local files are already up to date with the remote branch.'));
+      if (lastSyncedAt) {
+        console.log(chalk.gray(`  Last synced: ${lastSyncedAt}`));
+      }
+      return false;
+    } catch (diffError) {
+      // Diff exists, proceed to detailed check
+    }
+
     if (remoteCommit !== lastSyncedCommit) {
       console.log(chalk.yellow('\n📦 New changes detected from Jules session!'));
       if (lastSyncedCommit) {
@@ -101,8 +138,48 @@ function shouldApplyChanges(sessionId: string): boolean {
       console.log('');
     }
   } catch (e) {
-    // If git command fails, assume we should show changes
-    return true;
+    // Ignore git command failures, proceed to manual check below
+  }
+
+  // Detailed file content check
+  if (changes && changes.length > 0) {
+    let actualChangesExist = false;
+    for (const change of changes) {
+      const fullPath = path.resolve(process.cwd(), change.path);
+      if (!fs.existsSync(fullPath)) {
+        actualChangesExist = true;
+        break;
+      }
+      try {
+        const localContent = fs.readFileSync(fullPath, 'utf8');
+        
+        // Try forward patch
+        const forwardPatched = applyPatch(localContent, change.diff);
+        if (forwardPatched !== false && forwardPatched !== localContent) {
+          actualChangesExist = true;
+          break;
+        }
+        
+        if (forwardPatched === false) {
+          // Check if it's already applied (by reversing the patch)
+          const reversedDiff = reverseUnidiff(change.diff);
+          const backwardPatched = applyPatch(localContent, reversedDiff);
+          if (backwardPatched === false) {
+            // Mismatch/conflict, treat as change/need user interaction
+            actualChangesExist = true;
+            break;
+          }
+        }
+      } catch (e) {
+        actualChangesExist = true;
+        break;
+      }
+    }
+
+    if (!actualChangesExist) {
+      console.log(chalk.green('✓ Local files are already up to date (no changes detected).'));
+      return false;
+    }
   }
 
   return true; // new changes exist or could not verify
@@ -1940,10 +2017,14 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           !approvedPlans.has(a.id)
         );
         
-        const isWaitingState = ['IDLE', 'WAITING', 'COMPLETED', 'STOPPED', 'INACTIVE', 'AWAITING_USER_FEEDBACK', 'AWAITING_USER_INPUT', 'AWAITING_INPUT', 'PAUSED', 'HALTED', 'BLOCKED'].includes(currentState.toUpperCase()) ||
-                               status.requires_user_input === true ||
-                               status.requiresUserInput === true ||
-                               (activities.length > 0 && activities[activities.length - 1].agentMessaged?.agentMessage);
+        const isCompleteState = ['COMPLETED', 'SUCCEEDED', 'SUCCESS'].includes(currentState.toUpperCase());
+        
+        const isWaitingState = !isCompleteState && (
+          ['IDLE', 'WAITING', 'STOPPED', 'INACTIVE', 'AWAITING_USER_FEEDBACK', 'AWAITING_USER_INPUT', 'AWAITING_INPUT', 'PAUSED', 'HALTED', 'BLOCKED'].includes(currentState.toUpperCase()) ||
+          status.requires_user_input === true ||
+          status.requiresUserInput === true ||
+          (activities.length > 0 && activities[activities.length - 1].agentMessaged?.agentMessage)
+        );
 
         if (isWaitingState && !hasUnapprovedPlan) {
           idlePollCount++;
@@ -1989,7 +2070,6 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
         spinner.text = formatSpinnerText(currentVerb, currentState);
 
         // --- Bug 3: Detect Interrupt/Question ---
-        const isCompleteState = ['COMPLETED', 'SUCCEEDED', 'SUCCESS'].includes(currentState.toUpperCase());
         const isInterrupt = !isCompleteState && !hasUnapprovedPlan && (
           status.requires_user_input === true || 
           status.requiresUserInput === true ||
@@ -2579,7 +2659,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
             }
 
             if (changes.length > 0) {
-              if (forceSync || shouldApplyChanges(sessionId)) {
+              if (forceSync || shouldApplyChanges(sessionId, changes)) {
                 const applied = await applyChanges(changes);
                 
                 // Save sync state
