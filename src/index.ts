@@ -495,7 +495,10 @@ function handleEscapePress() {
 }
 
 // Enable raw keypress detection
-readline.emitKeypressEvents(process.stdin);
+if (!shellState.keypressEventsEmitted) {
+  readline.emitKeypressEvents(process.stdin);
+  shellState.keypressEventsEmitted = true;
+}
 if (process.stdin.isTTY) {
   try {
     process.stdin.setRawMode(true);
@@ -1038,7 +1041,10 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
       completer: (line: string) => [[], line]
     });
     rl = tempRl;
-    readline.emitKeypressEvents(process.stdin);
+    if (!shellState.keypressEventsEmitted) {
+      readline.emitKeypressEvents(process.stdin);
+      shellState.keypressEventsEmitted = true;
+    }
     if (process.stdin.isTTY) {
       try { process.stdin.setRawMode(true); } catch (e) {}
     }
@@ -1606,7 +1612,10 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
   console.log(chalk.cyan('🌐 Session URL : ') + chalk.yellow(sessionUrl));
   console.log(chalk.dim('──────────────────────────────────────────\n'));
 
-  readline.emitKeypressEvents(process.stdin);
+  if (!shellState.keypressEventsEmitted) {
+    readline.emitKeypressEvents(process.stdin);
+    shellState.keypressEventsEmitted = true;
+  }
   const wasRaw = process.stdin.isRaw;
   if (process.stdin.isTTY) {
     try { process.stdin.setRawMode(true); } catch (e) {}
@@ -3800,7 +3809,10 @@ async function startShell() {
     });
   };
 
-  readline.emitKeypressEvents(process.stdin);
+  if (!shellState.keypressEventsEmitted) {
+    readline.emitKeypressEvents(process.stdin);
+    shellState.keypressEventsEmitted = true;
+  }
   if (process.stdin.isTTY) {
     try { process.stdin.setRawMode(true); } catch (e) {}
   }

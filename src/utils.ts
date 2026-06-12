@@ -236,12 +236,16 @@ export const shellState = {
   isBottomAreaRendered: false,
   isRestarting: false,
   isTaskActive: false,
+  keypressEventsEmitted: false,
 };
 
 export function askUser(query: string): Promise<string> {
   const localSignal = shellState.abortController.signal;
   process.stdin.resume();
-  readline.emitKeypressEvents(process.stdin);
+  if (!shellState.keypressEventsEmitted) {
+    readline.emitKeypressEvents(process.stdin);
+    shellState.keypressEventsEmitted = true;
+  }
   if (process.stdin.isTTY) {
     try { process.stdin.setRawMode(true); } catch (e) {}
   }
