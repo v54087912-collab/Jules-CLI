@@ -535,6 +535,11 @@ async function createPrivateGitHubRepo(repoName: string, description: string, fo
 }
 
 function handleEscapePress() {
+  if (shellState.isTaskActive) {
+    process.stdout.write(chalk.yellow('\n⛔ Task cancelled by user (ESC). Exiting...\n'));
+    process.exit(0);
+  }
+
   if (shellState.escCancelled) return;
   shellState.escCancelled = true;
   shellState.sessionAborted = true;
@@ -865,10 +870,11 @@ const program = new Command();
 
 async function handleInit() {
   if (shellState.escCancelled) return;
-  await enforceWorkspace();
-  if (shellState.escCancelled) return;
-  validateEnv();
+  shellState.isTaskActive = true;
   try {
+    await enforceWorkspace();
+    if (shellState.escCancelled) return;
+    validateEnv();
     await initGit();
     if (shellState.escCancelled) return;
     const repoName = `jules-shadow-${path.basename(process.cwd())}`;
@@ -883,6 +889,8 @@ async function handleInit() {
       return;
     }
     logger.error(`Init failed: ${error.message}`);
+  } finally {
+    shellState.isTaskActive = false;
   }
 }
 
@@ -991,10 +999,11 @@ async function handleNewRepo() {
 
 async function handleSync() {
   if (shellState.escCancelled) return;
-  await enforceWorkspace();
-  if (shellState.escCancelled) return;
-  
+  shellState.isTaskActive = true;
   try {
+    await enforceWorkspace();
+    if (shellState.escCancelled) return;
+    
     // 1. Validate env first
     validateEnv();
     
@@ -1067,6 +1076,8 @@ async function handleSync() {
       console.log(chalk.yellow('  Fix: Set GITHUB_USER and GITHUB_EMAIL in .env'));
       console.log(chalk.gray(`  Path: ${path.join(process.cwd(), '.env')}`));
     }
+  } finally {
+    shellState.isTaskActive = false;
   }
 }
 
@@ -1249,56 +1260,94 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
     clearReplyBottomArea();
 
     const cols = process.stdout.columns || 80;
+    const rows = process.stdout.rows || 24;
+
+    // Lower threshold for mobile/small screens
+    if (rows < 3 || cols < 15) {
+      return;
+    }
+
     const separator = chalk.dim('─'.repeat(Math.max(0, cols - 2)));
     const left = '/shot for shortcuts';
     const right = '/session';
     
-    const lines = [separator];
+    const lines = [];
+    const isCompact = rows < 12;
 
-    if (liveStatus) {
-      lines.push(chalk.dim('  ⎿  ') + chalk.bold.cyan('Jules is working: ') + chalk.dim(liveStatus));
-    }
-
-    if (activeMatches.length > 0) {
-      const prefix = '  ⎿ ';
-      const styledMatches = activeMatches.map((m, idx) => 
-        idx === cyclingIndex ? chalk.bold.white(m) : chalk.dim(m)
-      );
-
-      const itemSeparator = '  ';
-      let plainText = prefix;
-      let keepCount = 0;
-
-      for (let i = 0; i < activeMatches.length; i++) {
-        const item = activeMatches[i];
-        const nextLength = plainText.length + (i > 0 ? itemSeparator.length : 0) + item.length;
-        if (nextLength > cols - 8) {
-          break;
+    if (isCompact) {
+      lines.push(separator);
+      if (liveStatus) {
+        const truncatedStatus = liveStatus.length > cols - 18 ? liveStatus.substring(0, cols - 21) + '...' : liveStatus;
+        lines.push(chalk.dim('  ⎿  ') + chalk.bold.cyan('Working: ') + chalk.dim(truncatedStatus));
+      } else if (activeMatches.length > 0) {
+        const prefix = '  ⎿ ';
+        const styledMatches = activeMatches.map((m, idx) => 
+          idx === cyclingIndex ? chalk.bold.white(m) : chalk.dim(m)
+        );
+        const itemSeparator = '  ';
+        let plainText = prefix;
+        let keepCount = 0;
+        for (let i = 0; i < activeMatches.length; i++) {
+          const item = activeMatches[i];
+          const nextLength = plainText.length + (i > 0 ? itemSeparator.length : 0) + item.length;
+          if (nextLength > cols - 8) break;
+          plainText += (i > 0 ? itemSeparator : '') + item;
+          keepCount++;
         }
-        plainText += (i > 0 ? itemSeparator : '') + item;
-        keepCount++;
+        if (keepCount === 0 && activeMatches.length > 0) keepCount = 1;
+        const displayMatches = styledMatches.slice(0, keepCount);
+        let formattedText = chalk.dim(prefix) + displayMatches.join(chalk.dim(itemSeparator));
+        if (keepCount < activeMatches.length) formattedText += chalk.dim('  …');
+        lines.push(formattedText);
+      }
+    } else {
+      lines.push(separator);
+
+      if (liveStatus) {
+        lines.push(chalk.dim('  ⎿  ') + chalk.bold.cyan('Jules is working: ') + chalk.dim(liveStatus));
       }
 
-      if (keepCount === 0 && activeMatches.length > 0) {
-        keepCount = 1;
+      if (activeMatches.length > 0) {
+        const prefix = '  ⎿ ';
+        const styledMatches = activeMatches.map((m, idx) => 
+          idx === cyclingIndex ? chalk.bold.white(m) : chalk.dim(m)
+        );
+
+        const itemSeparator = '  ';
+        let plainText = prefix;
+        let keepCount = 0;
+
+        for (let i = 0; i < activeMatches.length; i++) {
+          const item = activeMatches[i];
+          const nextLength = plainText.length + (i > 0 ? itemSeparator.length : 0) + item.length;
+          if (nextLength > cols - 8) {
+            break;
+          }
+          plainText += (i > 0 ? itemSeparator : '') + item;
+          keepCount++;
+        }
+
+        if (keepCount === 0 && activeMatches.length > 0) {
+          keepCount = 1;
+        }
+
+        const displayMatches = styledMatches.slice(0, keepCount);
+        let formattedText = chalk.dim(prefix) + displayMatches.join(chalk.dim(itemSeparator));
+        if (keepCount < activeMatches.length) {
+          formattedText += chalk.dim('  …');
+        }
+
+        lines.push(formattedText);
       }
 
-      const displayMatches = styledMatches.slice(0, keepCount);
-      let formattedText = chalk.dim(prefix) + displayMatches.join(chalk.dim(itemSeparator));
-      if (keepCount < activeMatches.length) {
-        formattedText += chalk.dim('  …');
+      if (cols > 40) {
+        const spaceCount = Math.max(2, cols - left.length - right.length - 10);
+        const footer = chalk.dim('  ' + left + ' '.repeat(spaceCount) + right);
+        lines.push(footer);
+      } else if (cols > 20) {
+        const footer = chalk.dim('  ' + right);
+        lines.push(footer);
       }
-
-      lines.push(formattedText);
-    }
-
-    if (cols > 40) {
-      const spaceCount = Math.max(2, cols - left.length - right.length - 10);
-      const footer = chalk.dim('  ' + left + ' '.repeat(spaceCount) + right);
-      lines.push(footer);
-    } else if (cols > 20) {
-      const footer = chalk.dim('  ' + right);
-      lines.push(footer);
     }
 
     const currentPrompt = (rl as any)._prompt || '';
@@ -1532,16 +1581,24 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
           const endIdx = substitutedLine.indexOf(']]', idx + placeholderPattern.length);
           if (endIdx !== -1) {
             const fullPlaceholder = substitutedLine.substring(idx, endIdx + 2);
-            substitutedLine = substitutedLine.replace(fullPlaceholder, replyPastedBlocks[i]);
+            substitutedLine = substitutedLine.replace(fullPlaceholder, () => replyPastedBlocks[i]);
             hadPlaceholders = true;
           }
         }
       }
 
       if (hadPlaceholders) {
+        rl!.off('line', lineHandler);
+        process.stdin.removeListener('keypress', keypressHandler);
+
         if (!(rl as any).closed) rl.pause();
         const proceed = await previewLargePaste(substitutedLine);
         if (!(rl as any).closed) rl.resume();
+
+        process.stdin.removeListener('keypress', keypressHandler);
+        process.stdin.prependListener('keypress', keypressHandler);
+        rl!.off('line', lineHandler);
+        rl!.on('line', lineHandler);
 
         if (!proceed) {
           replyPastedBlocks = [];
@@ -1553,9 +1610,6 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
           return;
         }
       }
-
-      replyPastedBlocks = [];
-      replyPasteCount = 0;
 
       const endsWithBackslash = substitutedLine.endsWith('\\');
       if (altEnterPressed || endsWithBackslash) {
@@ -1684,7 +1738,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
             const endIdx = substitutedLine.indexOf(']]', idx + placeholderPattern.length);
             if (endIdx !== -1) {
               const fullPlaceholder = substitutedLine.substring(idx, endIdx + 2);
-              substitutedLine = substitutedLine.replace(fullPlaceholder, replyPastedBlocks[i]);
+              substitutedLine = substitutedLine.replace(fullPlaceholder, () => replyPastedBlocks[i]);
             }
           }
         }
@@ -1711,6 +1765,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
 }
 
 export async function trackJulesSession(sessionId: string, repoUrl?: string, forceSync: boolean = false) {
+  shellState.isTaskActive = true;
   const localSignal = shellState.abortController.signal;
   const spinnerVerbs = [
     'Pondering',
@@ -2818,6 +2873,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
       }
     }
   } finally {
+    shellState.isTaskActive = false;
     if (spinner && spinner.isSpinning) spinner.stop();
     if (activePollingTimer) {
       clearInterval(activePollingTimer!);
@@ -2845,6 +2901,10 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
 async function handleEdit(instruction: string) {
   shellState.sessionAborted = false;
   shellState.escCancelled = false;
+  shellState.isTaskActive = true;
+  if (shellState.abortController.signal.aborted) {
+    shellState.abortController = new AbortController();
+  }
   const localSignal = shellState.abortController.signal;
   await enforceWorkspace();
   validateEnv();
@@ -2945,6 +3005,7 @@ async function handleEdit(instruction: string) {
     }
   } finally {
     closeAskUser();
+    shellState.isTaskActive = false;
   }
 }
 
@@ -3825,7 +3886,7 @@ async function startShell() {
     const cols = process.stdout.columns || 80;
 
     // Lower threshold for mobile/small screens
-    if (rows < 8 || cols < 30) {
+    if (rows < 3 || cols < 15) {
       clearBottomArea();
       shellState.isBottomAreaRendered = false;
       return;
@@ -3834,70 +3895,100 @@ async function startShell() {
     clearBottomArea();
 
     const lines: string[] = [];
-    lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
+    const isCompact = rows < 12;
 
-    const projectName = path.basename(process.cwd());
-    const mode = currentMode.toUpperCase();
-    
-    // Header Line: ⚙️ JULES-CLI | 📁 project [🌿 branch] | ⚡ MODE: FAST
-    const headerContent = `⚙️  JULES-CLI | 📁 ${projectName} [🌿 ${cachedBranch}] | ⚡ MODE: ${mode}`;
-    let truncatedHeader = headerContent;
-    if (truncatedHeader.length > cols - 2) {
-      truncatedHeader = `⚙️  JULES | 📁 ${projectName} [🌿 ${cachedBranch}]`;
+    if (isCompact) {
+      lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
+      if (matches.length > 0) {
+        const prefix = '  ⎿ ';
+        const styledMatches = matches.map((m, idx) => 
+          idx === cyclingIndex ? chalk.bold.white(m) : chalk.dim(m)
+        );
+        const itemSeparator = '  ';
+        let plainText = prefix;
+        let keepCount = 0;
+        for (let i = 0; i < matches.length; i++) {
+          const item = matches[i];
+          const nextLength = plainText.length + (i > 0 ? itemSeparator.length : 0) + item.length;
+          if (nextLength > cols - 8) break;
+          plainText += (i > 0 ? itemSeparator : '') + item;
+          keepCount++;
+        }
+        if (keepCount === 0 && matches.length > 0) keepCount = 1;
+        const displayMatches = styledMatches.slice(0, keepCount);
+        let formattedText = chalk.dim(prefix) + displayMatches.join(chalk.dim(itemSeparator));
+        if (keepCount < matches.length) formattedText += chalk.dim('  …');
+        lines.push(formattedText);
+      } else {
+        const projectName = path.basename(process.cwd());
+        const mode = currentMode.toUpperCase();
+        const shortHeader = `⚙️  ${projectName} [${mode}]`;
+        lines.push(chalk.cyan('  ' + (shortHeader.length > cols - 4 ? shortHeader.substring(0, cols - 7) + '...' : shortHeader)));
+      }
+    } else {
+      lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
+
+      const projectName = path.basename(process.cwd());
+      const mode = currentMode.toUpperCase();
+      
+      const headerContent = `⚙️  JULES-CLI | 📁 ${projectName} [🌿 ${cachedBranch}] | ⚡ MODE: ${mode}`;
+      let truncatedHeader = headerContent;
       if (truncatedHeader.length > cols - 2) {
-        truncatedHeader = `⚙️  JULES | 📁 ${projectName}`;
+        truncatedHeader = `⚙️  JULES | 📁 ${projectName} [🌿 ${cachedBranch}]`;
         if (truncatedHeader.length > cols - 2) {
-          truncatedHeader = truncatedHeader.substring(0, cols - 5) + '...';
+          truncatedHeader = `⚙️  JULES | 📁 ${projectName}`;
+          if (truncatedHeader.length > cols - 2) {
+            truncatedHeader = truncatedHeader.substring(0, cols - 5) + '...';
+          }
         }
       }
-    }
-    lines.push(chalk.cyan(truncatedHeader));
-    lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
+      lines.push(chalk.cyan(truncatedHeader));
+      lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
 
-    if (matches.length > 0) {
-      const prefix = '  ⎿ ';
-      const styledMatches = matches.map((m, idx) => 
-        idx === cyclingIndex ? chalk.bold.white(m) : chalk.dim(m)
-      );
+      if (matches.length > 0) {
+        const prefix = '  ⎿ ';
+        const styledMatches = matches.map((m, idx) => 
+          idx === cyclingIndex ? chalk.bold.white(m) : chalk.dim(m)
+        );
 
-      const itemSeparator = '  ';
-      let plainText = prefix;
-      let keepCount = 0;
+        const itemSeparator = '  ';
+        let plainText = prefix;
+        let keepCount = 0;
 
-      for (let i = 0; i < matches.length; i++) {
-        const item = matches[i];
-        const nextLength = plainText.length + (i > 0 ? itemSeparator.length : 0) + item.length;
-        if (nextLength > cols - 8) {
-          break;
+        for (let i = 0; i < matches.length; i++) {
+          const item = matches[i];
+          const nextLength = plainText.length + (i > 0 ? itemSeparator.length : 0) + item.length;
+          if (nextLength > cols - 8) {
+            break;
+          }
+          plainText += (i > 0 ? itemSeparator : '') + item;
+          keepCount++;
         }
-        plainText += (i > 0 ? itemSeparator : '') + item;
-        keepCount++;
+
+        if (keepCount === 0 && matches.length > 0) {
+          keepCount = 1;
+        }
+
+        const displayMatches = styledMatches.slice(0, keepCount);
+        let formattedText = chalk.dim(prefix) + displayMatches.join(chalk.dim(itemSeparator));
+        if (keepCount < matches.length) {
+          formattedText += chalk.dim('  …');
+        }
+
+        lines.push(formattedText);
       }
 
-      if (keepCount === 0 && matches.length > 0) {
-        keepCount = 1;
-      }
-
-      const displayMatches = styledMatches.slice(0, keepCount);
-      let formattedText = chalk.dim(prefix) + displayMatches.join(chalk.dim(itemSeparator));
-      if (keepCount < matches.length) {
-        formattedText += chalk.dim('  …');
-      }
-
-      lines.push(formattedText);
-    }
-
-    // Tips line: 💡 Tips: `/init` to link repo • `/help` for commands • `/exit` to quit
-    const tipsContent = `💡 Tips: \`/init\` to link repo  •  \`/help\` for commands  •  \`/exit\` to quit`;
-    let truncatedTips = tipsContent;
-    if (truncatedTips.length > cols - 2) {
-      truncatedTips = `💡 Tips: /init • /help • /exit`;
+      const tipsContent = `💡 Tips: \`/init\` to link repo  •  \`/help\` for commands  •  \`/exit\` to quit`;
+      let truncatedTips = tipsContent;
       if (truncatedTips.length > cols - 2) {
-        truncatedTips = truncatedTips.substring(0, cols - 5) + '...';
+        truncatedTips = `💡 Tips: /init • /help • /exit`;
+        if (truncatedTips.length > cols - 2) {
+          truncatedTips = truncatedTips.substring(0, cols - 5) + '...';
+        }
       }
+      lines.push(chalk.dim(truncatedTips));
+      lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
     }
-    lines.push(chalk.dim(truncatedTips));
-    lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
 
     const currentPrompt = (rl as any)._prompt || '';
     const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
@@ -4549,7 +4640,7 @@ async function startShell() {
         const endIdx = substitutedLine.indexOf(']]', idx + placeholderPattern.length);
         if (endIdx !== -1) {
           const fullPlaceholder = substitutedLine.substring(idx, endIdx + 2);
-          substitutedLine = substitutedLine.replace(fullPlaceholder, shellPastedBlocks[i]);
+          substitutedLine = substitutedLine.replace(fullPlaceholder, () => shellPastedBlocks[i]);
           hadPlaceholders = true;
         }
       }

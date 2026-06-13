@@ -269,6 +269,10 @@ export function askUser(query: string): Promise<string> {
                          (!key && (char === '\u001b' || char === '\x1b'));
         if (isEscape && !resolved) {
           resolved = true;
+          if (shellState.isTaskActive) {
+            process.stdout.write('\n⛔ Task cancelled by user (ESC). Exiting...\n');
+            process.exit(0);
+          }
           shellState.escCancelled = true;
           shellState.sessionAborted = true;
           shellState.abortController.abort();
@@ -317,6 +321,10 @@ export function askUser(query: string): Promise<string> {
                          (!key && (char === '\u001b' || char === '\x1b'));
         if (isEscape && !resolved) {
           resolved = true;
+          if (shellState.isTaskActive) {
+            process.stdout.write('\n⛔ Task cancelled by user (ESC). Exiting...\n');
+            process.exit(0);
+          }
           shellState.escCancelled = true;
           shellState.sessionAborted = true;
           shellState.abortController.abort();
