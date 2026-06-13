@@ -2441,7 +2441,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
 
           clearAllIntervals();
 
-          const userReply = await promptJulesReply('Reply (or type /exit):');
+          const userReply = await promptJulesReply('Reply (or type /exit):', sessionId);
 
           if (process.stdin.isTTY) {
             try { process.stdin.setRawMode(true); } catch (e) {}
@@ -2791,7 +2791,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
 
           clearAllIntervals();
 
-          const userReply = await promptJulesReply('Chat to resume (or type /exit):');
+          const userReply = await promptJulesReply('Chat to resume (or type /exit):', sessionId);
 
           if (process.stdin.isTTY) {
             try { process.stdin.setRawMode(true); } catch (e) {}
