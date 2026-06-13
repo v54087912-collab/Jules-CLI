@@ -46,7 +46,7 @@ export async function createShadowRepo(name: string): Promise<string> {
   }
 }
 
-export async function createJulesSession(prompt: string, repoUrl: string, branch: string = 'main', model?: string, signal?: AbortSignal) {
+export async function createJulesSession(prompt: string, repoUrl: string, branch?: string, model?: string, signal?: AbortSignal) {
   // Extract owner/repo from URL and clean up any auth tokens
   const match = repoUrl.match(/github\.com[\/:](.+?)\/(.+?)(\.git)?$/);
   if (!match) throw new Error('Invalid GitHub URL');
@@ -56,11 +56,14 @@ export async function createJulesSession(prompt: string, repoUrl: string, branch
     prompt,
     sourceContext: {
       source: `sources/github/${owner}/${repo}`,
-      githubRepoContext: {
-        startingBranch: branch,
-      },
     },
   };
+
+  if (branch) {
+    payload.sourceContext.githubRepoContext = {
+      startingBranch: branch,
+    };
+  }
 
   if (model) {
     payload.model = model;

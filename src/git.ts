@@ -127,12 +127,22 @@ export async function setRemote(url: string): Promise<void> {
   }
 }
 
-export async function getCurrentBranch(): Promise<string> {
+export async function getCurrentBranch(): Promise<string | undefined> {
   try {
     const branch = await git.cwd(process.cwd()).revparse(['--abbrev-ref', 'HEAD']);
-    return branch.trim() || 'main';
+    return branch.trim();
   } catch (e) {
-    return 'main';
+    try {
+      const remotes = await git.cwd(process.cwd()).getRemotes();
+      if (remotes.some(r => r.name === 'origin')) {
+        const lsRemote = await git.cwd(process.cwd()).listRemote(['--symref', 'origin', 'HEAD']);
+        const match = lsRemote.match(/ref: refs\/heads\/([^\s]+)\s+HEAD/);
+        if (match && match[1]) {
+          return match[1];
+        }
+      }
+    } catch (err) {}
+    return undefined;
   }
 }
 
