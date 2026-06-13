@@ -4752,10 +4752,29 @@ async function startShell() {
                 }
               } else {
                 process.chdir(projectPath);
-                logger.success(`Switched to project: ${selectedProject}`);
+                // [FIX-RC1] Always correct the remote for existing dirs when a GitHub repo is
+                // selected. The previous syncLocalChanges() bug may have written the wrong
+                // remote (jules-shadow-default-project) into this directory.
+                if (selectedRepoUrl) {
+                  await initGit();
+                  await setRemote(selectedRepoUrl);
+                  logger.info(`Updated remote for existing project: ${selectedProject}`);
+                } else {
+                  logger.success(`Switched to project: ${selectedProject}`);
+                }
               }
-              
-              const shadowUrl = await getRemoteUrl();
+
+              // [FIX-RC3] Clear stale session tracking — the old session belongs to the
+              // previous repo. The next /edit must open a fresh session on the new repo.
+              if (shellState.trackedSessionId) {
+                logger.info(`Cleared stale session (${shellState.trackedSessionId}) from previous repo.`);
+                shellState.trackedSessionId = '';
+                shellState.trackedSessionUrl = '';
+              }
+
+              // [FIX-RC2] Assign to outer `let shadowUrl` (not a new const) so every
+              // subsequent banner and display in startShell() shows the correct repo.
+              shadowUrl = await getRemoteUrl();
               const branch = await getCurrentBranch();
               const newStatus = getWorkspaceStatus();
               projectName = newStatus.projectName || selectedProject;
