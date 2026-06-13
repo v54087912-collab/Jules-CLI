@@ -535,11 +535,6 @@ async function createPrivateGitHubRepo(repoName: string, description: string, fo
 }
 
 function handleEscapePress() {
-  if (shellState.isTaskActive) {
-    process.stdout.write(chalk.yellow('\n⛔ Task cancelled by user (ESC). Exiting...\n'));
-    process.exit(0);
-  }
-
   if (shellState.escCancelled) return;
   shellState.escCancelled = true;
   shellState.sessionAborted = true;
@@ -1249,7 +1244,9 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
     const currentPrompt = (rl as any)._prompt || '';
     const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
     const actualPromptLen = cleanPrompt.length;
-    const col = actualPromptLen + rl!.cursor;
+    const cols = process.stdout.columns || 80;
+    let col = (actualPromptLen + rl!.cursor) % cols;
+    if (isNaN(col)) col = 0;
 
     readline.cursorTo(process.stdout, col);
     readline.clearScreenDown(process.stdout);
@@ -1976,7 +1973,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
 
     // Find the last agent message activity
     const agentMsgs = initialActivities.filter((a: any) => a.agentMessaged?.agentMessage);
-    const lastAgentMsg = agentMsgs[agentMsgs.length - 1];
+    const lastAgentMsg: any = null; // Do NOT skip marking last agent message as seen to avoid duplicate printing later, we already printed it in conversation history!
 
     for (const act of initialActivities) {
       const isPlanGen = !!act.planGenerated;
@@ -2051,6 +2048,9 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
       try {
         const status = await getSessionStatus(sessionId, localSignal);
         currentState = status.state || status.status || status.executionStatus?.state || 'WORKING';
+        if (['PAUSED', 'HALTED', 'INACTIVE'].includes(currentState.toUpperCase())) {
+            currentVerb = 'Paused';
+        }
 
         let activities: any[] = [];
         try {
@@ -3857,7 +3857,9 @@ async function startShell() {
     const currentPrompt = (rl as any)._prompt || '';
     const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
     const actualPromptLen = cleanPrompt.length;
-    const col = actualPromptLen + rl.cursor;
+    const cols = process.stdout.columns || 80;
+    let col = (actualPromptLen + rl.cursor) % cols;
+    if (isNaN(col)) col = 0;
 
     // Save current position, move to prompt column, clear everything below
     readline.cursorTo(process.stdout, col);
