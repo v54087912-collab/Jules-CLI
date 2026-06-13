@@ -536,8 +536,7 @@ async function createPrivateGitHubRepo(repoName: string, description: string, fo
 
 function handleEscapePress() {
   if (shellState.isTaskActive) {
-    process.stdout.write(chalk.yellow('\n⛔ Task cancelled by user (ESC). Exiting...\n'));
-    process.exit(0);
+    process.stdout.write(chalk.yellow('\n⛔ Task cancelled by user (ESC).\n'));
   }
 
   if (shellState.escCancelled) return;
@@ -1835,6 +1834,20 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
 
   let currentVerb = spinnerVerbs[0];
   let currentState = 'WORKING';
+
+  // FETCH INITIAL STATUS FIRST to avoid "Working • Crunching" when session is paused/inactive
+  let sessionStatus: any = null;
+  try {
+    sessionStatus = await getSessionStatus(sessionId, localSignal);
+    if (sessionStatus) {
+      currentState = sessionStatus.state || sessionStatus.status || sessionStatus.executionStatus?.state || 'WORKING';
+      const rawDesc = sessionStatus.description || sessionStatus.executionStatus?.description || sessionStatus.currentOperation || '';
+      if (rawDesc && !isJunkDescription(rawDesc)) {
+        currentVerb = rawDesc.replace(/\*+/g, '').trim();
+      }
+    }
+  } catch (e) {}
+
   updateActivityTracker(currentVerb);
 
   const spinner = ora({
@@ -2049,13 +2062,20 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
       }
 
       try {
-        const status = await getSessionStatus(sessionId, localSignal);
-        currentState = status.state || status.status || status.executionStatus?.state || 'WORKING';
-
+        let status: any = {};
         let activities: any[] = [];
         try {
-          activities = await getSessionActivities(sessionId, localSignal);
+          const [statusRes, activitiesRes] = await Promise.all([
+            getSessionStatus(sessionId, localSignal),
+            getSessionActivities(sessionId, localSignal).catch(() => [])
+          ]);
+          status = statusRes;
+          activities = activitiesRes as any[];
         } catch (e) {}
+
+        if (status) {
+          currentState = status.state || status.status || status.executionStatus?.state || currentState || 'WORKING';
+        }
 
         const planAct = activities.slice().reverse().find(a => a.planGenerated?.plan);
         if (planAct) {
