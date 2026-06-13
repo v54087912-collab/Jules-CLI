@@ -535,14 +535,20 @@ async function createPrivateGitHubRepo(repoName: string, description: string, fo
 }
 
 function handleEscapePress() {
-  if (shellState.isTaskActive) {
-    process.stdout.write(chalk.yellow('\n⛔ Task cancelled by user (ESC). Exiting...\n'));
-    process.exit(0);
-  }
-
   if (shellState.escCancelled) return;
   shellState.escCancelled = true;
   shellState.sessionAborted = true;
+
+  if (shellState.isTaskActive) {
+    process.stdout.write(chalk.yellow('\n⛔ Task cancelled by user (ESC).\n'));
+    if (activeSpinner && activeSpinner.isSpinning) activeSpinner.stop();
+    clearAllIntervals();
+    shellState.isTaskActive = false;
+    if (shellState.shellLineHandler && shellState.showPrompt) {
+      shellState.showPrompt();
+    }
+    return;
+  }
 
   // Abort any pending API calls IMMEDIATELY
   shellState.abortController.abort();
@@ -1809,7 +1815,12 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
     const now = new Date();
     const ts = `[${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}]`;
     
-    if (['IDLE', 'WAITING', 'COMPLETED', 'STOPPED', 'INACTIVE', 'AWAITING_USER_FEEDBACK', 'PAUSED', 'HALTED', 'BLOCKED'].includes(s)) {
+    // Some backend states indicate paused or waiting for user
+    const isPaused = ['IDLE', 'WAITING', 'STOPPED', 'INACTIVE', 'AWAITING_USER_FEEDBACK', 'PAUSED', 'HALTED', 'BLOCKED'].includes(s) || s.includes('QUESTION') || s.includes('INTERRUPT');
+
+    if (s === 'COMPLETED' || s === 'SUCCEEDED' || s === 'SUCCESS') {
+      return chalk.bold.green(`✅ Jules is completed ${chalk.dim(ts)}`);
+    } else if (isPaused) {
       const displayState = s.replace(/_/g, ' ');
       return chalk.bold.yellow(`⏸ Jules is ${displayState.toLowerCase()} ${chalk.dim(ts)}`);
     } else if (['ERROR', 'FAILED'].includes(s)) {
@@ -2159,6 +2170,28 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           
           await sendJulesMessage(sessionId, bridgedReply, localSignal);
           msgSpinner.stop();
+
+          // Re-establish the verb rotator polling timer after prompt Jules reply clears intervals
+          const newTimer = setInterval(() => {
+            if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
+              clearInterval(newTimer);
+              activeIntervals.delete(newTimer);
+              if (activePollingTimer === newTimer) activePollingTimer = null;
+              return;
+            }
+            if (spinner.isSpinning) {
+              const isStillRandom = (spinnerVerbs as readonly string[]).includes(currentVerb);
+              if (isStillRandom && !lastStatusDescription) {
+                currentVerb = spinnerVerbs[Math.floor(Math.random() * spinnerVerbs.length)];
+                updateActivityTracker(currentVerb);
+              }
+              spinner.text = formatSpinnerText(currentVerb, currentState);
+            }
+          }, 2000);
+          activeIntervals.add(newTimer);
+          activePollingTimer = newTimer;
+          shellState.activePollTimer = activePollingTimer;
+
           logger.success('Message sent successfully. Resuming session...');
           
           idlePollCount = 0;
@@ -2231,6 +2264,27 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           await sendJulesMessage(sessionId, bridgedReply, localSignal);
           msgSpinner.stop();
           
+          // Re-establish the verb rotator polling timer after prompt Jules reply clears intervals
+          const newTimer = setInterval(() => {
+            if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
+              clearInterval(newTimer);
+              activeIntervals.delete(newTimer);
+              if (activePollingTimer === newTimer) activePollingTimer = null;
+              return;
+            }
+            if (spinner.isSpinning) {
+              const isStillRandom = (spinnerVerbs as readonly string[]).includes(currentVerb);
+              if (isStillRandom && !lastStatusDescription) {
+                currentVerb = spinnerVerbs[Math.floor(Math.random() * spinnerVerbs.length)];
+                updateActivityTracker(currentVerb);
+              }
+              spinner.text = formatSpinnerText(currentVerb, currentState);
+            }
+          }, 2000);
+          activeIntervals.add(newTimer);
+          activePollingTimer = newTimer;
+          shellState.activePollTimer = activePollingTimer;
+
           console.log(chalk.bold.green('🧑 You: ') + chalk.white(userReply.trim()));
           console.log(chalk.dim('────────────────────────────────────\n'));
           
@@ -2241,9 +2295,9 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
         const rawDesc = status.description || status.executionStatus?.description || status.currentOperation || status.executionStatus?.currentOperation || '';
         if (rawDesc && rawDesc !== lastStatusDescription) {
           lastStatusDescription = rawDesc;
-          currentVerb = rawDesc;
+          const cleanDesc = rawDesc.replace(/\*\*/g, '').replace(/\n/g, ' ').trim();
+          currentVerb = cleanDesc;
           if (spinner.isSpinning) spinner.stop();
-          logger.info(rawDesc);
           spinner.start(formatSpinnerText(currentVerb, currentState));
         }
         
@@ -2818,6 +2872,28 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           
           await sendJulesMessage(sessionId, bridgedReply, localSignal);
           msgSpinner.stop();
+
+          // Re-establish the verb rotator polling timer after prompt Jules reply clears intervals
+          const newTimer = setInterval(() => {
+            if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
+              clearInterval(newTimer);
+              activeIntervals.delete(newTimer);
+              if (activePollingTimer === newTimer) activePollingTimer = null;
+              return;
+            }
+            if (spinner.isSpinning) {
+              const isStillRandom = (spinnerVerbs as readonly string[]).includes(currentVerb);
+              if (isStillRandom && !lastStatusDescription) {
+                currentVerb = spinnerVerbs[Math.floor(Math.random() * spinnerVerbs.length)];
+                updateActivityTracker(currentVerb);
+              }
+              spinner.text = formatSpinnerText(currentVerb, currentState);
+            }
+          }, 2000);
+          activeIntervals.add(newTimer);
+          activePollingTimer = newTimer;
+          shellState.activePollTimer = activePollingTimer;
+
           logger.success('Message sent successfully. Resuming session...');
           
           spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
@@ -5106,10 +5182,14 @@ async function startShell() {
         resizeTimer = null;
         return;
       }
-      activeBottomLines = 0; // Force reset because terminal viewport has reflowed
-      redrawUI();
+      // UI bug fix: Avoid aggressive UI redraw loops on resize that cause blinking/lag
+      // Simply skip redraw logic on low-end devices by debouncing more or not redrawing during task
+      if (!shellState.isTaskActive) {
+        activeBottomLines = 0; // Force reset because terminal viewport has reflowed
+        redrawUI();
+      }
       resizeTimer = null;
-    }, 150);
+    }, 500); // Increased debounce to 500ms to reduce CPU load/UI blinking on low-end devices
   };
   process.on('SIGWINCH', resizeHandler);
 
