@@ -71,19 +71,27 @@ export async function syncLocalChanges(): Promise<void> {
     await localGit.addConfig('user.email', email);
   } catch (e) {}
 
-  // Setup auth remote
+  // Setup auth remote — use the project's existing remote if set,
+  // otherwise fall back to SHADOW_REPO env for legacy support.
   const token = process.env.GITHUB_TOKEN;
   const user = process.env.GITHUB_USER;
-  const repo = process.env.SHADOW_REPO || 'jules-shadow-default-project';
   if (!token || !user) {
     throw new Error('GITHUB_TOKEN or GITHUB_USER missing in .env');
   }
-  
-  const url = `https://${token}@github.com/${user}/${repo}.git`;
-  const remotes = await localGit.getRemotes();
-  if (remotes.find(r => r.name === 'origin')) {
+
+  const existingRemotes = await localGit.getRemotes(true);
+  const existingOrigin = existingRemotes.find(r => r.name === 'origin');
+
+  let url: string;
+  if (existingOrigin && existingOrigin.refs.push) {
+    // Use the current project's already-configured remote, just ensure token is injected
+    const cleanUrl = existingOrigin.refs.push.replace(/https:\/\/[^@]+@/, 'https://');
+    url = cleanUrl.replace('https://', `https://${token}@`);
     await localGit.remote(['set-url', 'origin', url]);
   } else {
+    // No remote yet — fall back to SHADOW_REPO env
+    const repo = process.env.SHADOW_REPO || 'jules-shadow-default-project';
+    url = `https://${token}@github.com/${user}/${repo}.git`;
     await localGit.addRemote('origin', url);
   }
 

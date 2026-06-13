@@ -4699,12 +4699,14 @@ async function startShell() {
             }
 
             console.log(chalk.bold.white('\n  Your GitHub Repositories:'));
-            const displayRepos = githubRepos.slice(0, 15); // Show top 15 updated
-            displayRepos.forEach((r: any, i: number) => {
-              const num = localProjects.length + i + 1;
-              console.log(`    ${chalk.bold.cyan(num.toString().padEnd(3))} ${chalk.white(r.name)} ${chalk.dim('(' + r.full_name + ')')}`);
-            });
-            console.log('');
+            if (githubRepos.length === 0) {
+              console.log(chalk.dim('    (No GitHub repositories found)'));
+            } else {
+              githubRepos.forEach((r: any, i: number) => {
+                const num = localProjects.length + i + 1;
+                console.log(`    ${chalk.bold.cyan(num.toString().padEnd(3))} ${chalk.white(r.name)} ${chalk.dim('(' + r.full_name + ')')}`);
+              });
+            }
 
             if (!(rl as any).closed) rl.pause();
             const choice = await askUser(chalk.hex('#2ec4b6')('Select number or type name to switch/init (Enter to cancel): '));
@@ -4719,8 +4721,8 @@ async function startShell() {
             if (!isNaN(numChoice)) {
               if (numChoice >= 1 && numChoice <= localProjects.length) {
                 selectedProject = localProjects[numChoice - 1];
-              } else if (numChoice > localProjects.length && numChoice <= localProjects.length + displayRepos.length) {
-                const repo = displayRepos[numChoice - localProjects.length - 1];
+              } else if (numChoice > localProjects.length && numChoice <= localProjects.length + githubRepos.length) {
+                const repo = githubRepos[numChoice - localProjects.length - 1];
                 selectedProject = repo.name;
                 selectedRepoUrl = repo.clone_url.replace('https://', `https://${config.GITHUB_TOKEN}@`);
               }

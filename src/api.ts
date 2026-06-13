@@ -120,7 +120,8 @@ export async function deleteJulesSession(sessionId: string, signal?: AbortSignal
 
 export async function listUserRepos() {
   try {
-    const { data: repos } = await octokit.repos.listForAuthenticatedUser({
+    // Fetch ALL repos across all pages using octokit pagination
+    const repos = await octokit.paginate(octokit.repos.listForAuthenticatedUser, {
       sort: 'updated',
       per_page: 100,
     });
