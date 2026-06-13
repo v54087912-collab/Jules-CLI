@@ -1245,15 +1245,15 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
   };
 
   const clearReplyBottomArea = () => {
-    if (activeBottomLines > 0) {
-      const col = 2 + rl!.cursor;
-      for (let i = 1; i <= activeBottomLines; i++) {
-        process.stdout.write('\n\r\u001b[2K');
-      }
-      process.stdout.write(`\u001b[${activeBottomLines}A`);
-      process.stdout.write('\r' + (col > 0 ? `\u001b[${col}C` : ''));
-      activeBottomLines = 0;
-    }
+    if (activeBottomLines === 0) return;
+    const currentPrompt = (rl as any)._prompt || '';
+    const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
+    const actualPromptLen = cleanPrompt.length;
+    const col = actualPromptLen + rl!.cursor;
+
+    readline.cursorTo(process.stdout, col);
+    readline.clearScreenDown(process.stdout);
+    activeBottomLines = 0;
   };
 
   const drawReplyBottomArea = () => {
@@ -1358,23 +1358,14 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
       process.stdout.write(`\n\r\u001b[2K${line}`);
     }
 
-    const linesCount = lines.length;
-    process.stdout.write(`\u001b[${linesCount}A`);
-    process.stdout.write('\r' + (col > 0 ? `\u001b[${col}C` : ''));
-
-    activeBottomLines = linesCount;
+    activeBottomLines = lines.length;
+    readline.moveCursor(process.stdout, 0, -activeBottomLines);
+    readline.cursorTo(process.stdout, col);
   };
 
   const clearReplyBottomAreaOnEnter = () => {
     if (activeBottomLines === 0) return;
-    process.stdout.write('\r\u001b[2K');
-    for (let i = 1; i < activeBottomLines; i++) {
-      process.stdout.write('\n\r\u001b[2K');
-    }
-    if (activeBottomLines > 1) {
-      process.stdout.write(`\u001b[${activeBottomLines - 1}A`);
-    }
-    process.stdout.write('\r');
+    readline.clearScreenDown(process.stdout);
     activeBottomLines = 0;
     activeMatches = [];
     cyclingIndex = -1;
@@ -1565,6 +1556,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
             process.stdin.removeListener('keypress', oldKeypressHandler);
             process.stdin.prependListener('keypress', oldKeypressHandler);
           }
+          if (!(rl as any).closed) rl!.resume();
         }
 
         resolve('');
@@ -1727,6 +1719,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
             process.stdin.removeListener('keypress', oldKeypressHandler);
             process.stdin.prependListener('keypress', oldKeypressHandler);
           }
+          if (!(rl as any).closed) rl!.resume();
         }
         
         const fullLine = accumulatedLines.join('\n');
@@ -2239,12 +2232,11 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
         }
 
         const rawDesc = status.description || status.executionStatus?.description || status.currentOperation || status.executionStatus?.currentOperation || '';
-        if (rawDesc && rawDesc !== lastStatusDescription) {
+        if (rawDesc && rawDesc !== lastStatusDescription && !isJunkDescription(rawDesc)) {
           lastStatusDescription = rawDesc;
-          currentVerb = rawDesc;
-          if (spinner.isSpinning) spinner.stop();
-          logger.info(rawDesc);
-          spinner.start(formatSpinnerText(currentVerb, currentState));
+          const cleanDesc = rawDesc.replace(/\*+/g, '').trim();
+          currentVerb = cleanDesc;
+          spinner.text = formatSpinnerText(currentVerb, currentState);
         }
         
         if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
@@ -2449,7 +2441,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
 
           clearAllIntervals();
 
-          const userReply = await promptJulesReply('Reply (or type /exit):');
+          const userReply = await promptJulesReply('Reply (or type /exit):', sessionId);
 
           if (process.stdin.isTTY) {
             try { process.stdin.setRawMode(true); } catch (e) {}
@@ -2799,7 +2791,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
 
           clearAllIntervals();
 
-          const userReply = await promptJulesReply('Chat to resume (or type /exit):');
+          const userReply = await promptJulesReply('Chat to resume (or type /exit):', sessionId);
 
           if (process.stdin.isTTY) {
             try { process.stdin.setRawMode(true); } catch (e) {}
