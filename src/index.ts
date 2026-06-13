@@ -1747,6 +1747,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
         
         if (activePollingTimer) {
           clearInterval(activePollingTimer!);
+          activePollingTimer = null;
           shellState.activePollTimer = null;
         }
         resolve(substitutedLine);
@@ -1757,6 +1758,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
     rl!.on('close', () => {
       if (activePollingTimer) {
         clearInterval(activePollingTimer!);
+        activePollingTimer = null;
         shellState.activePollTimer = null;
       }
       resolve('');
@@ -1815,7 +1817,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
     } else if (['ERROR', 'FAILED'].includes(s)) {
       return chalk.bold.red(`❌ Jules encountered an error ${chalk.dim(ts)}`);
     } else {
-      const displayVerb = (verb && !['WORKING', 'ANALYZING', 'IN_PROGRESS', 'RUNNING'].includes(verb.toUpperCase())) ? verb : 'Analyzing';
+      const displayVerb = (verb && !['WORKING', 'ANALYZING', 'IN_PROGRESS', 'RUNNING'].includes(verb.toUpperCase())) ? verb.replace(/\*\*/g, '') : 'Analyzing';
       const displayStatus = (s === 'WORKING' || s === 'ANALYZING' || s === 'IN_PROGRESS' || s === 'RUNNING') ? 'Working' : s.replace(/_/g, ' ').toLowerCase();
       return chalk.bold.cyan(`⚡ Status: ${displayStatus.charAt(0).toUpperCase() + displayStatus.slice(1)}`) + chalk.dim(' • ') + chalk.white(`${displayVerb} ${chalk.dim(ts)}`);
     }
@@ -2243,7 +2245,6 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           lastStatusDescription = rawDesc;
           currentVerb = rawDesc;
           if (spinner.isSpinning) spinner.stop();
-          logger.info(rawDesc);
           spinner.start(formatSpinnerText(currentVerb, currentState));
         }
         

@@ -33,7 +33,9 @@
     "ora": "^5.4.1",
     "react": "^19.2.7",
     "simple-git": "^3.36.0",
-    "ts-node": "^10.9.2",
+    "ts-node": "^10.9.2"
+  },
+  "devDependencies": {
     "typescript": "^6.0.3"
   }
 }
