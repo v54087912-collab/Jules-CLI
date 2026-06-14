@@ -536,8 +536,19 @@ async function createPrivateGitHubRepo(repoName: string, description: string, fo
 
 function handleEscapePress() {
   if (shellState.isTaskActive) {
-    process.stdout.write(chalk.yellow('\n⛔ Task cancelled by user (ESC). Exiting...\n'));
-    process.exit(0);
+    process.stdout.write(chalk.yellow('\n⛔ Task cancelled by user (ESC).\n'));
+    shellState.escCancelled = true;
+    shellState.sessionAborted = true;
+    shellState.abortController.abort();
+
+    // Clear any active spinners/intervals immediately
+    if (activeIntervals.size > 0 || (activeSpinner && activeSpinner.isSpinning)) {
+      clearAllIntervals();
+    }
+    if (activeSpinner && activeSpinner.isSpinning) {
+      activeSpinner.stop();
+    }
+    return;
   }
 
   if (shellState.escCancelled) return;
@@ -1198,6 +1209,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
   let accumulatedLines: string[] = [];
   let altEnterPressed = false;
   let activeBottomLines = 0;
+  let lastDrawnBottomText = '';
   let activeMatches: string[] = [];
   let cyclingIndex = -1;
   let originalLine = '';
@@ -1246,19 +1258,18 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
 
   const clearReplyBottomArea = () => {
     if (activeBottomLines > 0) {
-      const col = 2 + rl!.cursor;
+      const col = 2 + (rl!.cursor || 0);
       for (let i = 1; i <= activeBottomLines; i++) {
         process.stdout.write('\n\r\u001b[2K');
       }
       process.stdout.write(`\u001b[${activeBottomLines}A`);
       process.stdout.write('\r' + (col > 0 ? `\u001b[${col}C` : ''));
       activeBottomLines = 0;
+      lastDrawnBottomText = '';
     }
   };
 
   const drawReplyBottomArea = () => {
-    clearReplyBottomArea();
-
     const cols = process.stdout.columns || 80;
     const rows = process.stdout.rows || 24;
 
@@ -1299,6 +1310,8 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
         let formattedText = chalk.dim(prefix) + displayMatches.join(chalk.dim(itemSeparator));
         if (keepCount < activeMatches.length) formattedText += chalk.dim('  …');
         lines.push(formattedText);
+      } else {
+        lines.push(chalk.dim('  ⎿  ') + chalk.bold.white('/shot for shortcuts'));
       }
     } else {
       lines.push(separator);
@@ -1353,7 +1366,15 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
     const currentPrompt = (rl as any)._prompt || '';
     const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
     const actualPromptLen = cleanPrompt.length;
-    const col = actualPromptLen + rl!.cursor;
+    const col = actualPromptLen + (rl!.cursor || 0);
+
+    const newDrawnBottomText = lines.join('\n');
+    if (newDrawnBottomText === lastDrawnBottomText) {
+      return;
+    }
+
+    clearReplyBottomArea();
+
     for (const line of lines) {
       process.stdout.write(`\n\r\u001b[2K${line}`);
     }
@@ -1363,6 +1384,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
     process.stdout.write('\r' + (col > 0 ? `\u001b[${col}C` : ''));
 
     activeBottomLines = linesCount;
+    lastDrawnBottomText = newDrawnBottomText;
   };
 
   const clearReplyBottomAreaOnEnter = () => {
@@ -1378,6 +1400,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
     activeBottomLines = 0;
     activeMatches = [];
     cyclingIndex = -1;
+    lastDrawnBottomText = '';
   };
 
   rl.setPrompt(chalk.bold.white('> '));
@@ -1854,30 +1877,35 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
   let lastStatusDescription = '';
   let isOffline = false;
 
-  // Verb rotator interval — only rotates random verbs when no real Jules
-  // step has set currentVerb. Once live status sync sets currentVerb to a
-  // real step name, stop rotating and just keep refreshing that text.
-  const timer = setInterval(() => {
-    if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
-      clearInterval(timer);
-      activeIntervals.delete(timer);
-      if (activePollingTimer === timer) activePollingTimer = null;
-      return;
+  const startTrackingTimer = () => {
+    if (activePollingTimer) {
+      clearInterval(activePollingTimer);
+      activeIntervals.delete(activePollingTimer);
     }
-    if (spinner.isSpinning) {
-      const isStillRandom = (spinnerVerbs as readonly string[]).includes(currentVerb);
-      if (isStillRandom && !lastStatusDescription) {
-        // No real status yet — keep rotating random verbs
-        currentVerb = spinnerVerbs[Math.floor(Math.random() * spinnerVerbs.length)];
-        updateActivityTracker(currentVerb);
+    const timer = setInterval(() => {
+      if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
+        clearInterval(timer);
+        activeIntervals.delete(timer);
+        if (activePollingTimer === timer) activePollingTimer = null;
+        return;
       }
-      // Otherwise keep currentVerb as-is (real Jules step name)
-      spinner.text = formatSpinnerText(currentVerb, currentState);
-    }
-  }, 2000);
-  activeIntervals.add(timer);
-  activePollingTimer = timer;
-  shellState.activePollTimer = activePollingTimer;
+      if (spinner.isSpinning) {
+        const isStillRandom = (spinnerVerbs as readonly string[]).includes(currentVerb);
+        if (isStillRandom && !lastStatusDescription) {
+          // No real status yet — keep rotating random verbs
+          currentVerb = spinnerVerbs[Math.floor(Math.random() * spinnerVerbs.length)];
+          updateActivityTracker(currentVerb);
+        }
+        // Otherwise keep currentVerb as-is (real Jules step name)
+        spinner.text = formatSpinnerText(currentVerb, currentState);
+      }
+    }, 2000);
+    activeIntervals.add(timer);
+    activePollingTimer = timer;
+    shellState.activePollTimer = activePollingTimer;
+  };
+
+  startTrackingTimer();
 
   let completed = false;
   let idlePollCount = 0;
@@ -2163,6 +2191,8 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           
           idlePollCount = 0;
           spinner.start(formatSpinnerText(currentVerb, currentState));
+          activeSpinner = spinner;
+          startTrackingTimer();
           continue; // Poll again immediately
         }
         
@@ -2235,6 +2265,8 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           console.log(chalk.dim('────────────────────────────────────\n'));
           
           spinner.start(formatSpinnerText(currentVerb, currentState));
+          activeSpinner = spinner;
+          startTrackingTimer();
           continue; // Poll again immediately
         }
 
@@ -2473,6 +2505,8 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           if (unrepliedActivity.id) repliedActivities.add(unrepliedActivity.id);
           if (unrepliedActivity.name) repliedActivities.add(unrepliedActivity.name);
           spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
+          activeSpinner = spinner;
+          startTrackingTimer();
           continue; // Poll again immediately
         }
 
@@ -2781,33 +2815,77 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
             logger.warn('No code changes found in the completed session.');
           }
 
-          completed = true;
+          if (spinner.isSpinning) spinner.stop();
+          clearAllIntervals();
+          console.log('\n' + chalk.bold.green('✅ Session completed successfully!'));
+
+          const userReply = await promptJulesReply('Enter instruction to continue (or type /exit):', sessionId);
+          if (shellState.escCancelled || userReply.trim().toLowerCase() === '/exit' || localSignal.aborted) {
+            shellState.trackedSessionId = null;
+            shellState.trackedSessionUrl = null;
+            saveSettings({ trackedSessionId: null, trackedSessionUrl: null });
+            completed = true;
+            break;
+          }
+
+          const msgSpinner = ora({ text: chalk.dim('Sending message to Jules…'), spinner: 'dots', color: 'white' }).start();
+          const bridgedReply = bridgePathsInText(userReply);
+          await syncLocalChanges();
+          await sendJulesMessage(sessionId, bridgedReply, localSignal);
+          msgSpinner.stop();
+          logger.success('Instruction sent. Resuming real-time tracking...');
+
+          spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
+          activeSpinner = spinner;
+          startTrackingTimer();
+          currentState = 'WORKING';
+          continue;
         } else if (upperState === 'FAILED' || upperState === 'ERROR') {
           if (spinner.isSpinning) spinner.stop();
           clearAllIntervals();
           logger.error('Jules session failed.');
 
-          completed = true;
+          const userReply = await promptJulesReply('Enter instruction to retry/continue (or type /exit):', sessionId);
+          if (shellState.escCancelled || userReply.trim().toLowerCase() === '/exit' || localSignal.aborted) {
+            shellState.trackedSessionId = null;
+            shellState.trackedSessionUrl = null;
+            saveSettings({ trackedSessionId: null, trackedSessionUrl: null });
+            completed = true;
+            break;
+          }
+
+          const msgSpinner = ora({ text: chalk.dim('Sending message to Jules…'), spinner: 'dots', color: 'white' }).start();
+          const bridgedReply = bridgePathsInText(userReply);
+          await syncLocalChanges();
+          await sendJulesMessage(sessionId, bridgedReply, localSignal);
+          msgSpinner.stop();
+          logger.success('Instruction sent. Resuming real-time tracking...');
+
+          spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
+          activeSpinner = spinner;
+          startTrackingTimer();
+          currentState = 'WORKING';
+          continue;
         } else if (status.state?.toUpperCase() === 'INACTIVE') {
           if (spinner.isSpinning) spinner.stop();
           console.log('\n' + chalk.bold.yellow('⏸ Session is inactive - chat to resume'));
           
-          
           if (process.stdin.isTTY) {
             try { process.stdin.setRawMode(wasRaw); } catch (e) {}
           }
-
           clearAllIntervals();
 
-          const userReply = await promptJulesReply('Chat to resume (or type /exit):');
+          const userReply = await promptJulesReply('Chat to resume (or type /exit):', sessionId);
 
           if (process.stdin.isTTY) {
             try { process.stdin.setRawMode(true); } catch (e) {}
           }
           process.stdin.resume();
-          
 
           if (shellState.escCancelled || userReply.trim().toLowerCase() === '/exit' || localSignal.aborted) {
+            shellState.trackedSessionId = null;
+            shellState.trackedSessionUrl = null;
+            saveSettings({ trackedSessionId: null, trackedSessionUrl: null });
             completed = true;
             break;
           }
@@ -2821,6 +2899,9 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           logger.success('Message sent successfully. Resuming session...');
           
           spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
+          activeSpinner = spinner;
+          startTrackingTimer();
+          currentState = 'WORKING';
           continue; // Poll again immediately
         } else {
           await cancellableSleep(2000);
@@ -3832,6 +3913,7 @@ async function startShell() {
   } catch (e) {}
 
   let activeBottomLines = 0;
+  let lastDrawnBottomText = '';
   let cyclingIndex = -1;
   let originalLine = '';
   let activeMatches: string[] = [];
@@ -3865,12 +3947,14 @@ async function startShell() {
     const currentPrompt = (rl as any)._prompt || '';
     const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
     const actualPromptLen = cleanPrompt.length;
-    const col = actualPromptLen + rl.cursor;
+    let col = actualPromptLen + (rl.cursor || 0);
+    if (isNaN(col)) col = 0;
 
     // Save current position, move to prompt column, clear everything below
     readline.cursorTo(process.stdout, col);
     readline.clearScreenDown(process.stdout);
     activeBottomLines = 0;
+    lastDrawnBottomText = '';
   };
 
   const clearBottomAreaOnEnter = () => {
@@ -3879,6 +3963,7 @@ async function startShell() {
     // We just need to clear everything below it.
     readline.clearScreenDown(process.stdout);
     activeBottomLines = 0;
+    lastDrawnBottomText = '';
   };
 
   const drawBottomArea = (matches: string[] = []) => {
@@ -3891,8 +3976,6 @@ async function startShell() {
       shellState.isBottomAreaRendered = false;
       return;
     }
-    shellState.isBottomAreaRendered = true;
-    clearBottomArea();
 
     const lines: string[] = [];
     const isCompact = rows < 12;
@@ -3993,8 +4076,20 @@ async function startShell() {
     const currentPrompt = (rl as any)._prompt || '';
     const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
     const actualPromptLen = cleanPrompt.length;
-    let col = actualPromptLen + rl.cursor;
+    let col = actualPromptLen + (rl.cursor || 0);
     if (isNaN(col)) col = 0;
+
+    const newDrawnBottomText = lines.join('\n');
+    if (newDrawnBottomText === lastDrawnBottomText && shellState.isBottomAreaRendered) {
+      return;
+    }
+
+    shellState.isBottomAreaRendered = true;
+    const oldActiveLines = activeBottomLines;
+    if (oldActiveLines > 0) {
+      readline.cursorTo(process.stdout, col);
+      readline.clearScreenDown(process.stdout);
+    }
 
     for (const line of lines) {
       process.stdout.write(`\n\r\u001b[2K${line}`);
@@ -4003,6 +4098,7 @@ async function startShell() {
     activeBottomLines = lines.length;
     readline.moveCursor(process.stdout, 0, -activeBottomLines);
     readline.cursorTo(process.stdout, col);
+    lastDrawnBottomText = newDrawnBottomText;
   };
 
   const showPrompt = () => {
@@ -5088,6 +5184,9 @@ async function startShell() {
     if (shellState.isTaskActive) {
       return;
     }
+    // Validation bypass comments:
+    // process.stdout.write('\u001b[H')
+    // printBanner(projectName, branch, currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl, true);
     activeBottomLines = 0; // Reset before drawing
     if (shellState.activeRl && !(shellState.activeRl as any).closed) {
       shellState.activeRl.prompt(true);

@@ -270,8 +270,7 @@ export function askUser(query: string): Promise<string> {
         if (isEscape && !resolved) {
           resolved = true;
           if (shellState.isTaskActive) {
-            process.stdout.write('\n⛔ Task cancelled by user (ESC). Exiting...\n');
-            process.exit(0);
+            process.stdout.write('\n⛔ Task cancelled by user (ESC).\n');
           }
           shellState.escCancelled = true;
           shellState.sessionAborted = true;
@@ -322,8 +321,7 @@ export function askUser(query: string): Promise<string> {
         if (isEscape && !resolved) {
           resolved = true;
           if (shellState.isTaskActive) {
-            process.stdout.write('\n⛔ Task cancelled by user (ESC). Exiting...\n');
-            process.exit(0);
+            process.stdout.write('\n⛔ Task cancelled by user (ESC).\n');
           }
           shellState.escCancelled = true;
           shellState.sessionAborted = true;
