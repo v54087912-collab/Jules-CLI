@@ -2147,11 +2147,16 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
         
         const isCompleteState = ['COMPLETED', 'SUCCEEDED', 'SUCCESS'].includes(currentState.toUpperCase());
         
-        const isWaitingState = !isCompleteState && (
-          ['IDLE', 'WAITING', 'STOPPED', 'INACTIVE', 'AWAITING_USER_FEEDBACK', 'AWAITING_USER_INPUT', 'AWAITING_INPUT', 'PAUSED', 'HALTED', 'BLOCKED'].includes(currentState.toUpperCase()) ||
-          status.requires_user_input === true ||
+        const isInterrupt = !isCompleteState && !hasUnapprovedPlan && (
+          status.requires_user_input === true || 
           status.requiresUserInput === true ||
+          ['question', 'interrupt', 'user_input_required', 'awaiting_user_feedback', 'awaiting_user_input', 'awaiting_input', 'paused', 'halted', 'blocked'].includes(status.type?.toLowerCase() || '') ||
+          ['awaiting_user_feedback', 'awaiting_user_input', 'awaiting_input', 'paused', 'halted', 'blocked', 'inactive'].includes(currentState.toLowerCase()) ||
           (activities.length > 0 && activities[activities.length - 1].agentMessaged?.agentMessage)
+        );
+
+        const isWaitingState = !isCompleteState && !isInterrupt && (
+          ['IDLE', 'WAITING', 'STOPPED'].includes(currentState.toUpperCase())
         );
 
         if (isWaitingState && !hasUnapprovedPlan) {
@@ -2160,7 +2165,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           idlePollCount = 0;
         }
 
-        if (idlePollCount >= 2) {
+        if (idlePollCount >= 5) { // Wait for 10 seconds (5 * 2s) of true IDLE before prompting
           if (spinner.isSpinning) spinner.stop();
           clearAllIntervals();
           
@@ -2193,20 +2198,14 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           spinner.start(formatSpinnerText(currentVerb, currentState));
           activeSpinner = spinner;
           startTrackingTimer();
-          continue; // Poll again immediately
+          
+          // Wait briefly for state to clear before continuing
+          await cancellableSleep(1000);
+          continue; // Poll again
         }
         
         // Update spinner text immediately
         spinner.text = formatSpinnerText(currentVerb, currentState);
-
-        // --- Bug 3: Detect Interrupt/Question ---
-        const isInterrupt = !isCompleteState && !hasUnapprovedPlan && (
-          status.requires_user_input === true || 
-          status.requiresUserInput === true ||
-          ['question', 'interrupt', 'user_input_required', 'awaiting_user_feedback', 'awaiting_user_input', 'awaiting_input', 'paused', 'halted', 'blocked'].includes(status.type?.toLowerCase() || '') ||
-          ['awaiting_user_feedback', 'awaiting_user_input', 'awaiting_input', 'paused', 'halted', 'blocked', 'inactive'].includes(currentState.toLowerCase()) ||
-          (activities.length > 0 && activities[activities.length - 1].agentMessaged?.agentMessage)
-        );
 
         if (isInterrupt) {
           if (spinner.isSpinning) spinner.stop();
@@ -2264,9 +2263,13 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           console.log(chalk.bold.green('🧑 You: ') + chalk.white(userReply.trim()));
           console.log(chalk.dim('────────────────────────────────────\n'));
           
+          idlePollCount = 0;
           spinner.start(formatSpinnerText(currentVerb, currentState));
           activeSpinner = spinner;
           startTrackingTimer();
+          
+          // Wait briefly for state to clear before continuing so we don't trigger again immediately
+          await cancellableSleep(1500);
           continue; // Poll again immediately
         }
 
