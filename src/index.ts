@@ -1144,6 +1144,42 @@ async function previewLargePaste(text: string): Promise<boolean> {
   return confirm.trim().toLowerCase() === 'y';
 }
 
+
+function hookReadlineFooter(rlInstance: any, footerProvider: () => string[]) {
+  if (rlInstance._julesHooked) return;
+  rlInstance._julesHooked = true;
+  const originalRefreshLine = rlInstance._refreshLine;
+  rlInstance._refreshLine = function() {
+    originalRefreshLine.call(this);
+    
+    try {
+      const lines = footerProvider();
+      if (!lines || lines.length === 0) return;
+
+      const cols = process.stdout.columns || 80;
+      const actualPromptLen = (this._prompt || '').replace(/\u001b\[[0-9;]*m/g, '').length;
+      const lineLen = this.line.length;
+      const totalRow = Math.floor((actualPromptLen + lineLen) / cols);
+      const cursorPos = this.getCursorPos();
+      let rowsBelow = totalRow - cursorPos.rows;
+      if (rowsBelow < 0) rowsBelow = 0;
+
+      if (rowsBelow > 0) {
+        process.stdout.write(`\u001b[${rowsBelow}B`);
+      }
+      
+      process.stdout.write('\n\r');
+      process.stdout.write(lines.join('\n\r') + '\n\r');
+      
+      const linesUp = lines.length + 1 + rowsBelow;
+      process.stdout.write(`\u001b[${linesUp}A\r`);
+      if (cursorPos.cols > 0) {
+        process.stdout.write(`\u001b[${cursorPos.cols}C`);
+      }
+    } catch (e) {}
+  };
+}
+
 async function promptJulesReply(cleanHeader: string, sessionId?: string): Promise<string> {
   shellState.sessionAborted = false;
   shellState.escCancelled = false;
@@ -1256,26 +1292,16 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
     drawReplyBottomArea();
   };
 
-  const clearReplyBottomArea = () => {
-    if (activeBottomLines > 0) {
-      const col = 2 + (rl!.cursor || 0);
-      for (let i = 1; i <= activeBottomLines; i++) {
-        process.stdout.write('\n\r\u001b[2K');
-      }
-      process.stdout.write(`\u001b[${activeBottomLines}A`);
-      process.stdout.write('\r' + (col > 0 ? `\u001b[${col}C` : ''));
-      activeBottomLines = 0;
-      lastDrawnBottomText = '';
-    }
-  };
+  const clearReplyBottomArea = () => {};
 
-  const drawReplyBottomArea = () => {
+  const drawReplyBottomArea = () => { (rl as any)._refreshLine(); };
+  hookReadlineFooter(rl, () => {
     const cols = process.stdout.columns || 80;
     const rows = process.stdout.rows || 24;
 
     // Lower threshold for mobile/small screens
     if (rows < 3 || cols < 15) {
-      return;
+      return [];
     }
 
     const separator = chalk.dim('─'.repeat(Math.max(0, cols - 2)));
@@ -1364,28 +1390,8 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
     }
 
     const currentPrompt = (rl as any)._prompt || '';
-    const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
-    const actualPromptLen = cleanPrompt.length;
-    const col = actualPromptLen + (rl!.cursor || 0);
-
-    const newDrawnBottomText = lines.join('\n');
-    if (newDrawnBottomText === lastDrawnBottomText) {
-      return;
-    }
-
-    clearReplyBottomArea();
-
-    for (const line of lines) {
-      process.stdout.write(`\n\r\u001b[2K${line}`);
-    }
-
-    const linesCount = lines.length;
-    process.stdout.write(`\u001b[${linesCount}A`);
-    process.stdout.write('\r' + (col > 0 ? `\u001b[${col}C` : ''));
-
-    activeBottomLines = linesCount;
-    lastDrawnBottomText = newDrawnBottomText;
-  };
+    return lines;
+  });
 
   const clearReplyBottomAreaOnEnter = () => {
     if (activeBottomLines === 0) return;
@@ -3945,39 +3951,19 @@ async function startShell() {
     return true;
   };
 
-  const clearBottomArea = () => {
-    if (activeBottomLines === 0) return;
-    const currentPrompt = (rl as any)._prompt || '';
-    const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
-    const actualPromptLen = cleanPrompt.length;
-    let col = actualPromptLen + (rl.cursor || 0);
-    if (isNaN(col)) col = 0;
+  const clearBottomArea = () => {};
 
-    // Save current position, move to prompt column, clear everything below
-    readline.cursorTo(process.stdout, col);
-    readline.clearScreenDown(process.stdout);
-    activeBottomLines = 0;
-    lastDrawnBottomText = '';
-  };
+  const clearBottomAreaOnEnter = () => {};
 
-  const clearBottomAreaOnEnter = () => {
-    if (activeBottomLines === 0) return;
-    // When Enter is pressed, the cursor is at the end of the input line.
-    // We just need to clear everything below it.
-    readline.clearScreenDown(process.stdout);
-    activeBottomLines = 0;
-    lastDrawnBottomText = '';
-  };
-
-  const drawBottomArea = (matches: string[] = []) => {
+  const drawBottomArea = (matches: string[] = []) => { (rl as any)._refreshLine(); };
+  hookReadlineFooter(rl, () => {
     const rows = process.stdout.rows || 24;
     const cols = process.stdout.columns || 80;
 
     // Lower threshold for mobile/small screens
     if (rows < 3 || cols < 15) {
-      clearBottomArea();
       shellState.isBottomAreaRendered = false;
-      return;
+      return [];
     }
 
     const lines: string[] = [];
@@ -3985,25 +3971,25 @@ async function startShell() {
 
     if (isCompact) {
       lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
-      if (matches.length > 0) {
+      if (activeMatches.length > 0) {
         const prefix = '  ⎿ ';
-        const styledMatches = matches.map((m, idx) => 
+        const styledMatches = activeMatches.map((m, idx) => 
           idx === cyclingIndex ? chalk.bold.white(m) : chalk.dim(m)
         );
         const itemSeparator = '  ';
         let plainText = prefix;
         let keepCount = 0;
-        for (let i = 0; i < matches.length; i++) {
-          const item = matches[i];
+        for (let i = 0; i < activeMatches.length; i++) {
+          const item = activeMatches[i];
           const nextLength = plainText.length + (i > 0 ? itemSeparator.length : 0) + item.length;
           if (nextLength > cols - 8) break;
           plainText += (i > 0 ? itemSeparator : '') + item;
           keepCount++;
         }
-        if (keepCount === 0 && matches.length > 0) keepCount = 1;
+        if (keepCount === 0 && activeMatches.length > 0) keepCount = 1;
         const displayMatches = styledMatches.slice(0, keepCount);
         let formattedText = chalk.dim(prefix) + displayMatches.join(chalk.dim(itemSeparator));
-        if (keepCount < matches.length) formattedText += chalk.dim('  …');
+        if (keepCount < activeMatches.length) formattedText += chalk.dim('  …');
         lines.push(formattedText);
       } else {
         const projectName = path.basename(process.cwd());
@@ -4031,9 +4017,9 @@ async function startShell() {
       lines.push(chalk.cyan(truncatedHeader));
       lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
 
-      if (matches.length > 0) {
+      if (activeMatches.length > 0) {
         const prefix = '  ⎿ ';
-        const styledMatches = matches.map((m, idx) => 
+        const styledMatches = activeMatches.map((m, idx) => 
           idx === cyclingIndex ? chalk.bold.white(m) : chalk.dim(m)
         );
 
@@ -4041,8 +4027,8 @@ async function startShell() {
         let plainText = prefix;
         let keepCount = 0;
 
-        for (let i = 0; i < matches.length; i++) {
-          const item = matches[i];
+        for (let i = 0; i < activeMatches.length; i++) {
+          const item = activeMatches[i];
           const nextLength = plainText.length + (i > 0 ? itemSeparator.length : 0) + item.length;
           if (nextLength > cols - 8) {
             break;
@@ -4051,13 +4037,13 @@ async function startShell() {
           keepCount++;
         }
 
-        if (keepCount === 0 && matches.length > 0) {
+        if (keepCount === 0 && activeMatches.length > 0) {
           keepCount = 1;
         }
 
         const displayMatches = styledMatches.slice(0, keepCount);
         let formattedText = chalk.dim(prefix) + displayMatches.join(chalk.dim(itemSeparator));
-        if (keepCount < matches.length) {
+        if (keepCount < activeMatches.length) {
           formattedText += chalk.dim('  …');
         }
 
@@ -4076,33 +4062,8 @@ async function startShell() {
       lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
     }
 
-    const currentPrompt = (rl as any)._prompt || '';
-    const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
-    const actualPromptLen = cleanPrompt.length;
-    let col = actualPromptLen + (rl.cursor || 0);
-    if (isNaN(col)) col = 0;
-
-    const newDrawnBottomText = lines.join('\n');
-    if (newDrawnBottomText === lastDrawnBottomText && shellState.isBottomAreaRendered) {
-      return;
-    }
-
-    shellState.isBottomAreaRendered = true;
-    const oldActiveLines = activeBottomLines;
-    if (oldActiveLines > 0) {
-      readline.cursorTo(process.stdout, col);
-      readline.clearScreenDown(process.stdout);
-    }
-
-    for (const line of lines) {
-      process.stdout.write(`\n\r\u001b[2K${line}`);
-    }
-
-    activeBottomLines = lines.length;
-    readline.moveCursor(process.stdout, 0, -activeBottomLines);
-    readline.cursorTo(process.stdout, col);
-    lastDrawnBottomText = newDrawnBottomText;
-  };
+    return lines;
+  });
 
   const showPrompt = () => {
     shellState.escCancelled = false;
