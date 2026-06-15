@@ -3103,7 +3103,7 @@ async function handleEdit(instruction: string) {
 
 
 let isOpenMode = false;
-let openRouterModel = 'deepseek/deepseek-coder:free';
+let openRouterModel = 'qwen/qwen3-coder:free';
 
 const OPENROUTER_STATS_FILE = path.join(process.env.HOME || process.env.USERPROFILE || '.', '.jules_openrouter_stats.json');
 
@@ -3216,47 +3216,14 @@ const PAID_MODELS = [
 
 const FREE_MODELS = [
   {
-    name: 'deepseek/deepseek-coder:free',
-    id: 'deepseek/deepseek-coder:free',
-    context: '64k tokens',
-    inputPrice: 0.00,
-    outputPrice: 0.00,
-    speed: '~94 tok/sec',
-    isFree: true,
-    bestFor: 'Coding, debugging',
-    limits: '20 req/min'
-  },
-  {
-    name: 'google/gemini-2.5-flash:free',
-    id: 'google/gemini-2.5-flash:free',
-    context: '1M tokens',
-    inputPrice: 0.00,
-    outputPrice: 0.00,
-    speed: '~130 tok/sec',
-    isFree: true,
-    bestFor: 'Multimodal, fast coding',
-    limits: '15 req/min'
-  },
-  {
-    name: 'google/gemini-2.0-flash-exp:free',
-    id: 'google/gemini-2.0-flash-exp:free',
-    context: '1M tokens',
-    inputPrice: 0.00,
-    outputPrice: 0.00,
-    speed: '~120 tok/sec',
-    isFree: true,
-    bestFor: 'Experimental features, speed',
-    limits: '10 req/min'
-  },
-  {
-    name: 'qwen/qwen-2.5-coder-32b-instruct:free',
-    id: 'qwen/qwen-2.5-coder-32b-instruct:free',
+    name: 'qwen/qwen3-coder:free',
+    id: 'qwen/qwen3-coder:free',
     context: '32k tokens',
     inputPrice: 0.00,
     outputPrice: 0.00,
-    speed: '~65 tok/sec',
+    speed: '~70 tok/sec',
     isFree: true,
-    bestFor: 'Open-source coding model',
+    bestFor: 'Coding, debugging',
     limits: '20 req/min'
   },
   {
@@ -3271,15 +3238,37 @@ const FREE_MODELS = [
     limits: '15 req/min'
   },
   {
-    name: 'meta-llama/llama-3.1-8b-instruct:free',
-    id: 'meta-llama/llama-3.1-8b-instruct:free',
-    context: '131k tokens',
+    name: 'meta-llama/llama-3.2-3b-instruct:free',
+    id: 'meta-llama/llama-3.2-3b-instruct:free',
+    context: '128k tokens',
     inputPrice: 0.00,
     outputPrice: 0.00,
-    speed: '~110 tok/sec',
+    speed: '~120 tok/sec',
     isFree: true,
-    bestFor: 'Lightweight instructions',
+    bestFor: 'Lightweight instruction, speed',
     limits: '20 req/min'
+  },
+  {
+    name: 'nousresearch/hermes-3-llama-3.1-405b:free',
+    id: 'nousresearch/hermes-3-llama-3.1-405b:free',
+    context: '405k tokens',
+    inputPrice: 0.00,
+    outputPrice: 0.00,
+    speed: '~30 tok/sec',
+    isFree: true,
+    bestFor: 'Complex reasoning, coding help',
+    limits: '10 req/min'
+  },
+  {
+    name: 'google/gemma-4-31b-it:free',
+    id: 'google/gemma-4-31b-it:free',
+    context: '32k tokens',
+    inputPrice: 0.00,
+    outputPrice: 0.00,
+    speed: '~90 tok/sec',
+    isFree: true,
+    bestFor: 'General tasks, conversations',
+    limits: '15 req/min'
   }
 ];
 
@@ -5890,11 +5879,11 @@ async function startShell() {
             console.log(chalk.bold.red('\n  .env Setup Guide (Missing OPENROUTER_API_KEY):'));
             console.log(chalk.dim('  Please set the following environment variables in your .env file:'));
             console.log(chalk.yellow('  OPENROUTER_API_KEY=sk-or-v1-xxxxxxx'));
-            console.log(chalk.yellow('  OPENROUTER_DEFAULT_MODEL=deepseek/deepseek-coder\n'));
+            console.log(chalk.yellow('  OPENROUTER_DEFAULT_MODEL=qwen/qwen3-coder:free\n'));
             logger.error('Could not activate Open Mode. OPENROUTER_API_KEY is not set.');
           } else {
             isOpenMode = true;
-            openRouterModel = process.env.OPENROUTER_DEFAULT_MODEL || 'deepseek/deepseek-coder:free';
+            openRouterModel = process.env.OPENROUTER_DEFAULT_MODEL || 'qwen/qwen3-coder:free';
             logger.success('OPEN MODE ACTIVE ✓');
             logger.info('All commands now route → OpenRouter');
             logger.info(`Active Model: ${chalk.bold(openRouterModel)}`);
