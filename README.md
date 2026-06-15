@@ -17,7 +17,7 @@
             | |_| | | |_| | | |___ | |___ ___) |   | |___| |___ | | 
              \___/|_|  \___/|_____||_____|____/     \____|_____|___|
 
-                JULES  C L I  v2.0 —  research preview Developer: Rev
+                JULES  C L I  v2.5 —  research preview Developer: Rev
 </b></font>
 </pre>
 
