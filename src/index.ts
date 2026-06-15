@@ -13,7 +13,6 @@ import fs from 'fs';
 import { bridgePathsInText, restoreExternalMappedFiles } from './bridge';
 import { execSync, spawn } from 'child_process';
 import dotenv from 'dotenv';
-import axios from 'axios';
 
 async function sendJulesMessage(sessionId: string, prompt: string, signal?: AbortSignal) {
   await apiSendJulesMessage(sessionId, prompt, signal);
@@ -538,18 +537,6 @@ async function createPrivateGitHubRepo(repoName: string, description: string, fo
 function handleEscapePress() {
   if (shellState.isTaskActive) {
     process.stdout.write(chalk.yellow('\n⛔ Task cancelled by user (ESC).\n'));
-    shellState.escCancelled = true;
-    shellState.sessionAborted = true;
-    shellState.abortController.abort();
-
-    // Clear any active spinners/intervals immediately
-    if (activeIntervals.size > 0 || (activeSpinner && activeSpinner.isSpinning)) {
-      clearAllIntervals();
-    }
-    if (activeSpinner && activeSpinner.isSpinning) {
-      activeSpinner.stop();
-    }
-    return;
   }
 
   if (shellState.escCancelled) return;
@@ -1145,42 +1132,6 @@ async function previewLargePaste(text: string): Promise<boolean> {
   return confirm.trim().toLowerCase() === 'y';
 }
 
-
-function hookReadlineFooter(rlInstance: any, footerProvider: () => string[]) {
-  if (rlInstance._julesHooked) return;
-  rlInstance._julesHooked = true;
-  const originalRefreshLine = rlInstance._refreshLine;
-  rlInstance._refreshLine = function() {
-    originalRefreshLine.call(this);
-    
-    try {
-      const lines = footerProvider();
-      if (!lines || lines.length === 0) return;
-
-      const cols = process.stdout.columns || 80;
-      const actualPromptLen = (this._prompt || '').replace(/\u001b\[[0-9;]*m/g, '').length;
-      const lineLen = this.line.length;
-      const totalRow = Math.floor((actualPromptLen + lineLen) / cols);
-      const cursorPos = this.getCursorPos();
-      let rowsBelow = totalRow - cursorPos.rows;
-      if (rowsBelow < 0) rowsBelow = 0;
-
-      if (rowsBelow > 0) {
-        process.stdout.write(`\u001b[${rowsBelow}B`);
-      }
-      
-      process.stdout.write('\n\r');
-      process.stdout.write(lines.join('\n\r') + '\n\r');
-      
-      const linesUp = lines.length + 1 + rowsBelow;
-      process.stdout.write(`\u001b[${linesUp}A\r`);
-      if (cursorPos.cols > 0) {
-        process.stdout.write(`\u001b[${cursorPos.cols}C`);
-      }
-    } catch (e) {}
-  };
-}
-
 async function promptJulesReply(cleanHeader: string, sessionId?: string): Promise<string> {
   shellState.sessionAborted = false;
   shellState.escCancelled = false;
@@ -1246,7 +1197,6 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
   let accumulatedLines: string[] = [];
   let altEnterPressed = false;
   let activeBottomLines = 0;
-  let lastDrawnBottomText = '';
   let activeMatches: string[] = [];
   let cyclingIndex = -1;
   let originalLine = '';
@@ -1293,16 +1243,27 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
     drawReplyBottomArea();
   };
 
-  const clearReplyBottomArea = () => {};
+  const clearReplyBottomArea = () => {
+    if (activeBottomLines === 0) return;
+    const currentPrompt = (rl as any)._prompt || '';
+    const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
+    const actualPromptLen = cleanPrompt.length;
+    const col = actualPromptLen + rl!.cursor;
 
-  const drawReplyBottomArea = () => { (rl as any)._refreshLine(); };
-  hookReadlineFooter(rl, () => {
+    readline.cursorTo(process.stdout, col);
+    readline.clearScreenDown(process.stdout);
+    activeBottomLines = 0;
+  };
+
+  const drawReplyBottomArea = () => {
+    clearReplyBottomArea();
+
     const cols = process.stdout.columns || 80;
     const rows = process.stdout.rows || 24;
 
     // Lower threshold for mobile/small screens
     if (rows < 3 || cols < 15) {
-      return [];
+      return;
     }
 
     const separator = chalk.dim('─'.repeat(Math.max(0, cols - 2)));
@@ -1337,8 +1298,6 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
         let formattedText = chalk.dim(prefix) + displayMatches.join(chalk.dim(itemSeparator));
         if (keepCount < activeMatches.length) formattedText += chalk.dim('  …');
         lines.push(formattedText);
-      } else {
-        lines.push(chalk.dim('  ⎿  ') + chalk.bold.white('/shot for shortcuts'));
       }
     } else {
       lines.push(separator);
@@ -1391,23 +1350,24 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
     }
 
     const currentPrompt = (rl as any)._prompt || '';
-    return lines;
-  });
+    const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
+    const actualPromptLen = cleanPrompt.length;
+    const col = actualPromptLen + rl!.cursor;
+    for (const line of lines) {
+      process.stdout.write(`\n\r\u001b[2K${line}`);
+    }
+
+    activeBottomLines = lines.length;
+    readline.moveCursor(process.stdout, 0, -activeBottomLines);
+    readline.cursorTo(process.stdout, col);
+  };
 
   const clearReplyBottomAreaOnEnter = () => {
     if (activeBottomLines === 0) return;
-    process.stdout.write('\r\u001b[2K');
-    for (let i = 1; i < activeBottomLines; i++) {
-      process.stdout.write('\n\r\u001b[2K');
-    }
-    if (activeBottomLines > 1) {
-      process.stdout.write(`\u001b[${activeBottomLines - 1}A`);
-    }
-    process.stdout.write('\r');
+    readline.clearScreenDown(process.stdout);
     activeBottomLines = 0;
     activeMatches = [];
     cyclingIndex = -1;
-    lastDrawnBottomText = '';
   };
 
   rl.setPrompt(chalk.bold.white('> '));
@@ -1549,7 +1509,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
       const line = rl!.line;
       let newMatches: string[] = [];
       if (line.startsWith('/')) {
-        newMatches = ['/init', '/newrepo', '/repo', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/diff', '/revert', '/help', '/docs', '/shot', '/deleteworkspace', '/exit', '/open', '/exitmode', '/model', '/freemodels', '/chatmode'].filter(c => c.startsWith(line));
+        newMatches = ['/init', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/diff', '/revert', '/help', '/docs', '/shot', '/exit'].filter(c => c.startsWith(line));
         if (newMatches.length > 0 && line === newMatches[0]) {
           newMatches = [];
         }
@@ -1595,6 +1555,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
             process.stdin.removeListener('keypress', oldKeypressHandler);
             process.stdin.prependListener('keypress', oldKeypressHandler);
           }
+          if (!(rl as any).closed) rl!.resume();
         }
 
         resolve('');
@@ -1757,6 +1718,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
             process.stdin.removeListener('keypress', oldKeypressHandler);
             process.stdin.prependListener('keypress', oldKeypressHandler);
           }
+          if (!(rl as any).closed) rl!.resume();
         }
         
         const fullLine = accumulatedLines.join('\n');
@@ -1872,6 +1834,20 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
 
   let currentVerb = spinnerVerbs[0];
   let currentState = 'WORKING';
+
+  // FETCH INITIAL STATUS FIRST to avoid "Working • Crunching" when session is paused/inactive
+  let sessionStatus: any = null;
+  try {
+    sessionStatus = await getSessionStatus(sessionId, localSignal);
+    if (sessionStatus) {
+      currentState = sessionStatus.state || sessionStatus.status || sessionStatus.executionStatus?.state || 'WORKING';
+      const rawDesc = sessionStatus.description || sessionStatus.executionStatus?.description || sessionStatus.currentOperation || '';
+      if (rawDesc && !isJunkDescription(rawDesc)) {
+        currentVerb = rawDesc.replace(/\*+/g, '').trim();
+      }
+    }
+  } catch (e) {}
+
   updateActivityTracker(currentVerb);
 
   const spinner = ora({
@@ -1884,35 +1860,30 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
   let lastStatusDescription = '';
   let isOffline = false;
 
-  const startTrackingTimer = () => {
-    if (activePollingTimer) {
-      clearInterval(activePollingTimer);
-      activeIntervals.delete(activePollingTimer);
+  // Verb rotator interval — only rotates random verbs when no real Jules
+  // step has set currentVerb. Once live status sync sets currentVerb to a
+  // real step name, stop rotating and just keep refreshing that text.
+  const timer = setInterval(() => {
+    if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
+      clearInterval(timer);
+      activeIntervals.delete(timer);
+      if (activePollingTimer === timer) activePollingTimer = null;
+      return;
     }
-    const timer = setInterval(() => {
-      if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
-        clearInterval(timer);
-        activeIntervals.delete(timer);
-        if (activePollingTimer === timer) activePollingTimer = null;
-        return;
+    if (spinner.isSpinning) {
+      const isStillRandom = (spinnerVerbs as readonly string[]).includes(currentVerb);
+      if (isStillRandom && !lastStatusDescription) {
+        // No real status yet — keep rotating random verbs
+        currentVerb = spinnerVerbs[Math.floor(Math.random() * spinnerVerbs.length)];
+        updateActivityTracker(currentVerb);
       }
-      if (spinner.isSpinning) {
-        const isStillRandom = (spinnerVerbs as readonly string[]).includes(currentVerb);
-        if (isStillRandom && !lastStatusDescription) {
-          // No real status yet — keep rotating random verbs
-          currentVerb = spinnerVerbs[Math.floor(Math.random() * spinnerVerbs.length)];
-          updateActivityTracker(currentVerb);
-        }
-        // Otherwise keep currentVerb as-is (real Jules step name)
-        spinner.text = formatSpinnerText(currentVerb, currentState);
-      }
-    }, 2000);
-    activeIntervals.add(timer);
-    activePollingTimer = timer;
-    shellState.activePollTimer = activePollingTimer;
-  };
-
-  startTrackingTimer();
+      // Otherwise keep currentVerb as-is (real Jules step name)
+      spinner.text = formatSpinnerText(currentVerb, currentState);
+    }
+  }, 2000);
+  activeIntervals.add(timer);
+  activePollingTimer = timer;
+  shellState.activePollTimer = activePollingTimer;
 
   let completed = false;
   let idlePollCount = 0;
@@ -2091,13 +2062,20 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
       }
 
       try {
-        const status = await getSessionStatus(sessionId, localSignal);
-        currentState = status.state || status.status || status.executionStatus?.state || 'WORKING';
-
+        let status: any = {};
         let activities: any[] = [];
         try {
-          activities = await getSessionActivities(sessionId, localSignal);
+          const [statusRes, activitiesRes] = await Promise.all([
+            getSessionStatus(sessionId, localSignal),
+            getSessionActivities(sessionId, localSignal).catch(() => [])
+          ]);
+          status = statusRes;
+          activities = activitiesRes as any[];
         } catch (e) {}
+
+        if (status) {
+          currentState = status.state || status.status || status.executionStatus?.state || currentState || 'WORKING';
+        }
 
         const planAct = activities.slice().reverse().find(a => a.planGenerated?.plan);
         if (planAct) {
@@ -2154,16 +2132,11 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
         
         const isCompleteState = ['COMPLETED', 'SUCCEEDED', 'SUCCESS'].includes(currentState.toUpperCase());
         
-        const isInterrupt = !isCompleteState && !hasUnapprovedPlan && (
-          status.requires_user_input === true || 
+        const isWaitingState = !isCompleteState && (
+          ['IDLE', 'WAITING', 'STOPPED', 'INACTIVE', 'AWAITING_USER_FEEDBACK', 'AWAITING_USER_INPUT', 'AWAITING_INPUT', 'PAUSED', 'HALTED', 'BLOCKED'].includes(currentState.toUpperCase()) ||
+          status.requires_user_input === true ||
           status.requiresUserInput === true ||
-          ['question', 'interrupt', 'user_input_required', 'awaiting_user_feedback', 'awaiting_user_input', 'awaiting_input', 'paused', 'halted', 'blocked'].includes(status.type?.toLowerCase() || '') ||
-          ['awaiting_user_feedback', 'awaiting_user_input', 'awaiting_input', 'paused', 'halted', 'blocked', 'inactive'].includes(currentState.toLowerCase()) ||
           (activities.length > 0 && activities[activities.length - 1].agentMessaged?.agentMessage)
-        );
-
-        const isWaitingState = !isCompleteState && !isInterrupt && (
-          ['IDLE', 'WAITING', 'STOPPED'].includes(currentState.toUpperCase())
         );
 
         if (isWaitingState && !hasUnapprovedPlan) {
@@ -2172,7 +2145,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           idlePollCount = 0;
         }
 
-        if (idlePollCount >= 5) { // Wait for 10 seconds (5 * 2s) of true IDLE before prompting
+        if (idlePollCount >= 2) {
           if (spinner.isSpinning) spinner.stop();
           clearAllIntervals();
           
@@ -2203,16 +2176,20 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           
           idlePollCount = 0;
           spinner.start(formatSpinnerText(currentVerb, currentState));
-          activeSpinner = spinner;
-          startTrackingTimer();
-          
-          // Wait briefly for state to clear before continuing
-          await cancellableSleep(1000);
-          continue; // Poll again
+          continue; // Poll again immediately
         }
         
         // Update spinner text immediately
         spinner.text = formatSpinnerText(currentVerb, currentState);
+
+        // --- Bug 3: Detect Interrupt/Question ---
+        const isInterrupt = !isCompleteState && !hasUnapprovedPlan && (
+          status.requires_user_input === true || 
+          status.requiresUserInput === true ||
+          ['question', 'interrupt', 'user_input_required', 'awaiting_user_feedback', 'awaiting_user_input', 'awaiting_input', 'paused', 'halted', 'blocked'].includes(status.type?.toLowerCase() || '') ||
+          ['awaiting_user_feedback', 'awaiting_user_input', 'awaiting_input', 'paused', 'halted', 'blocked', 'inactive'].includes(currentState.toLowerCase()) ||
+          (activities.length > 0 && activities[activities.length - 1].agentMessaged?.agentMessage)
+        );
 
         if (isInterrupt) {
           if (spinner.isSpinning) spinner.stop();
@@ -2270,23 +2247,16 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           console.log(chalk.bold.green('🧑 You: ') + chalk.white(userReply.trim()));
           console.log(chalk.dim('────────────────────────────────────\n'));
           
-          idlePollCount = 0;
           spinner.start(formatSpinnerText(currentVerb, currentState));
-          activeSpinner = spinner;
-          startTrackingTimer();
-          
-          // Wait briefly for state to clear before continuing so we don't trigger again immediately
-          await cancellableSleep(1500);
           continue; // Poll again immediately
         }
 
         const rawDesc = status.description || status.executionStatus?.description || status.currentOperation || status.executionStatus?.currentOperation || '';
-        if (rawDesc && rawDesc !== lastStatusDescription) {
+        if (rawDesc && rawDesc !== lastStatusDescription && !isJunkDescription(rawDesc)) {
           lastStatusDescription = rawDesc;
-          currentVerb = rawDesc;
-          if (spinner.isSpinning) spinner.stop();
-          logger.info(rawDesc);
-          spinner.start(formatSpinnerText(currentVerb, currentState));
+          const cleanDesc = rawDesc.replace(/\*+/g, '').trim();
+          currentVerb = cleanDesc;
+          spinner.text = formatSpinnerText(currentVerb, currentState);
         }
         
         if (shellState.escCancelled || localSignal.aborted || shellState.sessionAborted) {
@@ -2491,7 +2461,7 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
 
           clearAllIntervals();
 
-          const userReply = await promptJulesReply('Reply (or type /exit):');
+          const userReply = await promptJulesReply('Reply (or type /exit):', sessionId);
 
           if (process.stdin.isTTY) {
             try { process.stdin.setRawMode(true); } catch (e) {}
@@ -2515,8 +2485,6 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           if (unrepliedActivity.id) repliedActivities.add(unrepliedActivity.id);
           if (unrepliedActivity.name) repliedActivities.add(unrepliedActivity.name);
           spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
-          activeSpinner = spinner;
-          startTrackingTimer();
           continue; // Poll again immediately
         }
 
@@ -2825,64 +2793,22 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
             logger.warn('No code changes found in the completed session.');
           }
 
-          if (spinner.isSpinning) spinner.stop();
-          clearAllIntervals();
-          console.log('\n' + chalk.bold.green('✅ Session completed successfully!'));
-
-          const userReply = await promptJulesReply('Enter instruction to continue (or type /exit):', sessionId);
-          if (shellState.escCancelled || userReply.trim().toLowerCase() === '/exit' || localSignal.aborted) {
-            shellState.trackedSessionId = null;
-            shellState.trackedSessionUrl = null;
-            saveSettings({ trackedSessionId: null, trackedSessionUrl: null });
-            completed = true;
-            break;
-          }
-
-          const msgSpinner = ora({ text: chalk.dim('Sending message to Jules…'), spinner: 'dots', color: 'white' }).start();
-          const bridgedReply = bridgePathsInText(userReply);
-          await syncLocalChanges();
-          await sendJulesMessage(sessionId, bridgedReply, localSignal);
-          msgSpinner.stop();
-          logger.success('Instruction sent. Resuming real-time tracking...');
-
-          spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
-          activeSpinner = spinner;
-          startTrackingTimer();
-          currentState = 'WORKING';
-          continue;
+          completed = true;
         } else if (upperState === 'FAILED' || upperState === 'ERROR') {
           if (spinner.isSpinning) spinner.stop();
           clearAllIntervals();
           logger.error('Jules session failed.');
 
-          const userReply = await promptJulesReply('Enter instruction to retry/continue (or type /exit):', sessionId);
-          if (shellState.escCancelled || userReply.trim().toLowerCase() === '/exit' || localSignal.aborted) {
-            shellState.trackedSessionId = null;
-            shellState.trackedSessionUrl = null;
-            saveSettings({ trackedSessionId: null, trackedSessionUrl: null });
-            completed = true;
-            break;
-          }
-
-          const msgSpinner = ora({ text: chalk.dim('Sending message to Jules…'), spinner: 'dots', color: 'white' }).start();
-          const bridgedReply = bridgePathsInText(userReply);
-          await syncLocalChanges();
-          await sendJulesMessage(sessionId, bridgedReply, localSignal);
-          msgSpinner.stop();
-          logger.success('Instruction sent. Resuming real-time tracking...');
-
-          spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
-          activeSpinner = spinner;
-          startTrackingTimer();
-          currentState = 'WORKING';
-          continue;
+          completed = true;
         } else if (status.state?.toUpperCase() === 'INACTIVE') {
           if (spinner.isSpinning) spinner.stop();
           console.log('\n' + chalk.bold.yellow('⏸ Session is inactive - chat to resume'));
           
+          
           if (process.stdin.isTTY) {
             try { process.stdin.setRawMode(wasRaw); } catch (e) {}
           }
+
           clearAllIntervals();
 
           const userReply = await promptJulesReply('Chat to resume (or type /exit):', sessionId);
@@ -2891,11 +2817,9 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
             try { process.stdin.setRawMode(true); } catch (e) {}
           }
           process.stdin.resume();
+          
 
           if (shellState.escCancelled || userReply.trim().toLowerCase() === '/exit' || localSignal.aborted) {
-            shellState.trackedSessionId = null;
-            shellState.trackedSessionUrl = null;
-            saveSettings({ trackedSessionId: null, trackedSessionUrl: null });
             completed = true;
             break;
           }
@@ -2909,9 +2833,6 @@ export async function trackJulesSession(sessionId: string, repoUrl?: string, for
           logger.success('Message sent successfully. Resuming session...');
           
           spinner.start(chalk.bold.white(`∴ ${currentVerb}…`));
-          activeSpinner = spinner;
-          startTrackingTimer();
-          currentState = 'WORKING';
           continue; // Poll again immediately
         } else {
           await cancellableSleep(2000);
@@ -3100,831 +3021,6 @@ async function handleEdit(instruction: string) {
   }
 }
 
-
-
-let isOpenMode = false;
-let openRouterModel = 'qwen/qwen3-coder:free';
-
-const OPENROUTER_STATS_FILE = path.join(process.env.HOME || process.env.USERPROFILE || '.', '.jules_openrouter_stats.json');
-
-interface OpenRouterStats {
-  requestsToday: number;
-  tokensToday: number;
-  lastResetDate: string;
-}
-
-function loadOpenRouterStats(): OpenRouterStats {
-  const todayStr = new Date().toISOString().slice(0, 10);
-  if (fs.existsSync(OPENROUTER_STATS_FILE)) {
-    try {
-      const stats = JSON.parse(fs.readFileSync(OPENROUTER_STATS_FILE, 'utf8'));
-      if (stats.lastResetDate === todayStr) {
-        return stats;
-      }
-    } catch (e) {}
-  }
-  return {
-    requestsToday: 0,
-    tokensToday: 0,
-    lastResetDate: todayStr
-  };
-}
-
-function saveOpenRouterStats(stats: OpenRouterStats) {
-  try {
-    fs.writeFileSync(OPENROUTER_STATS_FILE, JSON.stringify(stats, null, 2));
-  } catch (e) {
-    logger.warn('Failed to save OpenRouter statistics.');
-  }
-}
-
-interface OpenModeActivity {
-  command: string;
-  query: string;
-  tokens: number;
-  cost: number;
-}
-let openModeSessionActivities: OpenModeActivity[] = [];
-let lastResponseLatency = 0.0;
-let lastResponseSpeed = 0;
-
-const PAID_MODELS = [
-  {
-    name: 'anthropic/claude-3.5-sonnet',
-    id: 'anthropic/claude-3.5-sonnet',
-    context: '200k tokens',
-    inputPrice: 3.00,
-    outputPrice: 15.00,
-    speed: '~85 tok/sec',
-    isFree: false
-  },
-  {
-    name: 'openai/gpt-4o',
-    id: 'openai/gpt-4o',
-    context: '128k tokens',
-    inputPrice: 2.50,
-    outputPrice: 10.00,
-    speed: '~110 tok/sec',
-    isFree: false
-  },
-  {
-    name: 'deepseek/deepseek-chat',
-    id: 'deepseek/deepseek-chat',
-    context: '64k tokens',
-    inputPrice: 0.14,
-    outputPrice: 0.28,
-    speed: '~70 tok/sec',
-    isFree: false
-  },
-  {
-    name: 'deepseek/deepseek-reasoner',
-    id: 'deepseek/deepseek-reasoner',
-    context: '64k tokens',
-    inputPrice: 0.55,
-    outputPrice: 2.19,
-    speed: '~30 tok/sec',
-    isFree: false
-  },
-  {
-    name: 'google/gemini-3.1-pro-preview',
-    id: 'google/gemini-3.1-pro-preview-20260219',
-    context: '1M tokens',
-    inputPrice: 2.00,
-    outputPrice: 12.00,
-    speed: '~40 tok/sec',
-    isFree: false
-  },
-  {
-    name: 'google/gemini-2.5-pro',
-    id: 'google/gemini-2.5-pro',
-    context: '2M tokens',
-    inputPrice: 1.25,
-    outputPrice: 5.00,
-    speed: '~60 tok/sec',
-    isFree: false
-  },
-  {
-    name: 'google/gemini-2.5-flash',
-    id: 'google/gemini-2.5-flash',
-    context: '1M tokens',
-    inputPrice: 0.075,
-    outputPrice: 0.30,
-    speed: '~130 tok/sec',
-    isFree: false
-  },
-  {
-    name: 'openai/gpt-4o-mini',
-    id: 'openai/gpt-4o-mini',
-    context: '128k tokens',
-    inputPrice: 0.15,
-    outputPrice: 0.60,
-    speed: '~140 tok/sec',
-    isFree: false
-  }
-];
-
-const FREE_MODELS = [
-  {
-    name: 'meta-llama/llama-3.2-3b-instruct:free',
-    id: 'meta-llama/llama-3.2-3b-instruct:free',
-    context: '128k tokens',
-    inputPrice: 0.00,
-    outputPrice: 0.00,
-    speed: '~120 tok/sec',
-    isFree: true,
-    bestFor: 'Lightweight instruction, speed',
-    limits: '20 req/min'
-  },
-  {
-    name: 'meta-llama/llama-3.3-70b-instruct:free',
-    id: 'meta-llama/llama-3.3-70b-instruct:free',
-    context: '128k tokens',
-    inputPrice: 0.00,
-    outputPrice: 0.00,
-    speed: '~55 tok/sec',
-    isFree: true,
-    bestFor: 'Complex reasoning, general instruction',
-    limits: '15 req/min'
-  },
-  {
-    name: 'meta-llama/llama-3.2-3b-instruct:free',
-    id: 'meta-llama/llama-3.2-3b-instruct:free',
-    context: '128k tokens',
-    inputPrice: 0.00,
-    outputPrice: 0.00,
-    speed: '~120 tok/sec',
-    isFree: true,
-    bestFor: 'Lightweight instruction, speed',
-    limits: '20 req/min'
-  },
-  {
-    name: 'nousresearch/hermes-3-llama-3.1-405b:free',
-    id: 'nousresearch/hermes-3-llama-3.1-405b:free',
-    context: '405k tokens',
-    inputPrice: 0.00,
-    outputPrice: 0.00,
-    speed: '~30 tok/sec',
-    isFree: true,
-    bestFor: 'Complex reasoning, coding help',
-    limits: '10 req/min'
-  },
-  {
-    name: 'google/gemma-4-31b-it:free',
-    id: 'google/gemma-4-31b-it:free',
-    context: '32k tokens',
-    inputPrice: 0.00,
-    outputPrice: 0.00,
-    speed: '~90 tok/sec',
-    isFree: true,
-    bestFor: 'General tasks, conversations',
-    limits: '15 req/min'
-  }
-];
-
-const EDIT_SYSTEM_PROMPT = `You are Antigravity, a professional AI coding assistant.
-Your task is to modify the local codebase based on the user's instructions.
-
-First, analyze the project structure and read-only context.
-When you need to modify files, write your modifications using Search/Replace blocks.
-Each block must specify the file path and contain the exact code to search for, followed by the replacement code.
-
-Format each edit block exactly like this:
-
-FILE: path/to/file.ext
-<<<<<<< SEARCH
-[exact lines of code to search for]
-=======
-[replacement lines of code]
->>>>>>>
-
-Rules:
-1. Make sure to specify the file path relative to the project root after "FILE: ".
-2. The SEARCH block must match the existing code EXACTLY, including indentation, spaces, and line breaks.
-3. If you want to create a new file, specify "FILE: path/to/newfile.ext", leave the SEARCH block empty, and place the full contents in the REPLACE block.
-4. Keep other explanations brief. Focus on making clean, precise edits.
-`;
-
-function printBoxLine(content: string, colorFn: any) {
-  const width = 60;
-  const cleanLen = content.replace(/\x1b\[[0-9;]*m/g, '').length;
-  const padding = width - cleanLen;
-  if (padding > 0) {
-    console.log(colorFn('│ ') + content + ' '.repeat(padding - 1) + colorFn('│'));
-  } else {
-    console.log(colorFn('│ ') + content.substring(0, width - 2) + colorFn('│'));
-  }
-}
-
-function printPaidModels() {
-  const width = 60;
-  const borderTop    = `┌${'─'.repeat(width)}┐`;
-  const borderMiddle = `├${'─'.repeat(width)}┤`;
-  const borderBottom = `└${'─'.repeat(width)}┘`;
-
-  console.log(chalk.bold.cyan(borderTop));
-  console.log(chalk.bold.cyan(`│  📦 PAID MODELS — OpenRouter${' '.repeat(width - 28)}│`));
-  console.log(chalk.bold.cyan(borderMiddle));
-  for (let i = 0; i < PAID_MODELS.length; i++) {
-    const m = PAID_MODELS[i];
-    printBoxLine(`[${i + 1}] ${m.name}`, chalk.cyan);
-    printBoxLine(`    Context : ${m.context}`, chalk.cyan);
-    printBoxLine(`    Input   : $${m.inputPrice.toFixed(4)} / 1M tokens`, chalk.cyan);
-    printBoxLine(`    Output  : $${m.outputPrice.toFixed(4)} / 1M tokens`, chalk.cyan);
-    printBoxLine(`    Speed   : ${m.speed}`, chalk.cyan);
-    if (i < PAID_MODELS.length - 1) {
-      console.log(chalk.bold.cyan(borderMiddle));
-    }
-  }
-  console.log(chalk.bold.cyan(borderBottom));
-}
-
-function printFreeModels() {
-  const width = 60;
-  const borderTop    = `┌${'─'.repeat(width)}┐`;
-  const borderMiddle = `├${'─'.repeat(width)}┤`;
-  const borderBottom = `└${'─'.repeat(width)}┘`;
-
-  console.log(chalk.bold.cyan(borderTop));
-  console.log(chalk.bold.cyan(`│  🆓 FREE MODELS — OpenRouter${' '.repeat(width - 28)}│`));
-  console.log(chalk.bold.cyan(borderMiddle));
-  for (let i = 0; i < FREE_MODELS.length; i++) {
-    const m = FREE_MODELS[i];
-    printBoxLine(`[${i + 1}] ${m.name}`, chalk.cyan);
-    printBoxLine(`    Context : ${m.context}`, chalk.cyan);
-    printBoxLine(`    Cost    : FREE ✓`, chalk.cyan);
-    printBoxLine(`    Best for: ${m.bestFor || ''}`, chalk.cyan);
-    printBoxLine(`    Limits  : ${m.limits || ''}`, chalk.cyan);
-    if (i < FREE_MODELS.length - 1) {
-      console.log(chalk.bold.cyan(borderMiddle));
-    }
-  }
-  console.log(chalk.bold.cyan(borderBottom));
-}
-
-async function handleModelCommand() {
-  printPaidModels();
-  const choice = await askUser('  Select model [1-N] or /back : ');
-  const trimmed = choice.trim();
-  if (trimmed === '/back' || trimmed === '') {
-    logger.info('Model selection cancelled.');
-    return;
-  }
-  const idx = parseInt(trimmed, 10);
-  if (isNaN(idx) || idx < 1 || idx > PAID_MODELS.length) {
-    logger.error('Invalid choice.');
-    return;
-  }
-  const selected = PAID_MODELS[idx - 1];
-  openRouterModel = selected.id;
-  logger.success(`Active OpenRouter model set to: ${chalk.bold(openRouterModel)}`);
-}
-
-async function handleFreemodelsCommand() {
-  printFreeModels();
-  const choice = await askUser('  Select model [1-N] : ');
-  const trimmed = choice.trim();
-  if (trimmed === '/back' || trimmed === '') {
-    logger.info('Model selection cancelled.');
-    return;
-  }
-  const idx = parseInt(trimmed, 10);
-  if (isNaN(idx) || idx < 1 || idx > FREE_MODELS.length) {
-    logger.error('Invalid choice.');
-    return;
-  }
-  const selected = FREE_MODELS[idx - 1];
-  openRouterModel = selected.id;
-  logger.success(`Active OpenRouter model set to: ${chalk.bold(openRouterModel)}`);
-}
-
-async function queryOpenRouter(messages: { role: string, content: string }[], commandName: string, queryDesc: string, signal?: AbortSignal): Promise<string> {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    throw new Error('OPENROUTER_API_KEY is not set in your .env file.');
-  }
-
-  const startTime = Date.now();
-  const res = await axios.post(
-    'https://openrouter.ai/api/v1/chat/completions',
-    {
-      model: openRouterModel,
-      messages: messages
-    },
-    {
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'HTTP-Referer': 'https://github.com/v54087912-collab/Jules-CLI',
-        'X-Title': 'Jules CLI',
-        'Content-Type': 'application/json'
-      },
-      signal: signal
-    }
-  );
-
-  const endTime = Date.now();
-  const latency = (endTime - startTime) / 1000;
-  lastResponseLatency = parseFloat(latency.toFixed(1));
-
-  const choice = res.data?.choices?.[0];
-  const reply = choice?.message?.content || '';
-
-  const usage = res.data?.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-  const promptTokens = usage.prompt_tokens || 0;
-  const completionTokens = usage.completion_tokens || 0;
-  const totalTokens = usage.total_tokens || 0;
-
-  lastResponseSpeed = latency > 0 ? Math.round(completionTokens / latency) : 0;
-
-  // Find price
-  let inputPrice = 0;
-  let outputPrice = 0;
-  const matchModel = [...PAID_MODELS, ...FREE_MODELS].find(m => m.id === openRouterModel);
-  if (matchModel) {
-    inputPrice = matchModel.inputPrice;
-    outputPrice = matchModel.outputPrice;
-  }
-
-  const cost = (promptTokens * inputPrice / 1000000) + (completionTokens * outputPrice / 1000000);
-
-  // Update stats
-  const stats = loadOpenRouterStats();
-  stats.requestsToday += 1;
-  stats.tokensToday += totalTokens;
-  saveOpenRouterStats(stats);
-
-  // Add session activity
-  openModeSessionActivities.push({
-    command: commandName,
-    query: queryDesc,
-    tokens: totalTokens,
-    cost: cost
-  });
-
-  return reply;
-}
-
-function printActivityPanelLine(content: string, colorFn: any = chalk.white) {
-  const cleanLen = content.replace(/\x1b\[[0-9;]*m/g, '').length;
-  const padding = 42 - cleanLen;
-  if (padding > 0) {
-    console.log(chalk.bold.blue('║') + colorFn(content) + ' '.repeat(padding) + chalk.bold.blue('║'));
-  } else {
-    console.log(chalk.bold.blue('║') + colorFn(content.substring(0, 42)) + chalk.bold.blue('║'));
-  }
-}
-
-function drawOpenModeActivityPanel() {
-  const stats = loadOpenRouterStats();
-  
-  // Calculate reset time (next 06:00 AM IST)
-  const now = new Date();
-  const istNow = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
-  const istReset = new Date(istNow);
-  istReset.setUTCHours(6, 0, 0, 0);
-  if (istNow.getTime() >= istReset.getTime()) {
-    istReset.setUTCDate(istReset.getUTCDate() + 1);
-  }
-  const diffMs = istReset.getTime() - istNow.getTime();
-  const hoursLeft = Math.floor(diffMs / (3600 * 1000));
-  const minutesLeft = Math.floor((diffMs % (3600 * 1000)) / (60 * 1000));
-  const resetStr = `06:00 AM IST (${hoursLeft}h ${minutesLeft}m left)`;
-
-  const blue = chalk.bold.blue;
-  const green = chalk.green;
-  
-  console.log(blue('╔══════════════════════════════════════════╗'));
-  printActivityPanelLine('     OPEN MODE — Live Activity            ', chalk.bold.cyan);
-  console.log(blue('╠══════════════════════════════════════════╣'));
-  printActivityPanelLine(` Model    : ${openRouterModel}`);
-  printActivityPanelLine(` Status   : ● Connected                  `, (s: string) => s.replace('● Connected', green('● Connected')));
-  console.log(blue('╠══════════════════════════════════════════╣'));
-  printActivityPanelLine(' QUOTA                                    ', chalk.bold.yellow);
-  printActivityPanelLine(`  Requests  : ${stats.requestsToday} / 200 today`);
-  printActivityPanelLine(`  Tokens    : ${stats.tokensToday.toLocaleString()} / 50,000`);
-  printActivityPanelLine(`  Reset     : ${resetStr}`);
-  console.log(blue('╠══════════════════════════════════════════╣'));
-  printActivityPanelLine(' SESSION ACTIVITY                         ', chalk.bold.yellow);
-  if (openModeSessionActivities.length === 0) {
-    printActivityPanelLine('  (No activity yet in this session)       ', chalk.dim);
-  } else {
-    // Show last 5 activities
-    const lastActs = openModeSessionActivities.slice(-5);
-    for (const act of lastActs) {
-      const actStr = `  ✓ ${act.command} ${act.query}`;
-      const rightStr = `→ ${act.tokens} tok  $${act.cost.toFixed(2)}`;
-      
-      const cleanActStr = actStr.replace(/\x1b\[[0-9;]*m/g, '');
-      const cleanRightStr = rightStr.replace(/\x1b\[[0-9;]*m/g, '');
-      
-      const availSpace = 42 - cleanRightStr.length - 2;
-      let leftTrunc = cleanActStr;
-      if (leftTrunc.length > availSpace) {
-        leftTrunc = leftTrunc.substring(0, availSpace - 3) + '...';
-      }
-      
-      const paddingVal = 42 - leftTrunc.length - cleanRightStr.length;
-      const padding = paddingVal > 0 ? ' '.repeat(paddingVal) : ' ';
-      
-      const styledLeft = leftTrunc.replace('✓', chalk.green('✓'));
-      const styledRight = chalk.dim(rightStr);
-      
-      console.log(blue('║') + styledLeft + padding + styledRight + blue('║'));
-    }
-  }
-  console.log(blue('╠══════════════════════════════════════════╣'));
-  printActivityPanelLine(' LAST RESPONSE                            ', chalk.bold.yellow);
-  printActivityPanelLine(`  Latency : ${lastResponseLatency}s`);
-  printActivityPanelLine(`  Speed   : ${lastResponseSpeed} tok/sec`);
-  console.log(blue('╚══════════════════════════════════════════╝'));
-}
-
-interface ScannedFile {
-  relPath: string;
-  absPath: string;
-  lineCount: number;
-  content: string;
-}
-
-function getRelativePath(absolutePath: string, rootDir: string): string {
-  return path.relative(rootDir, absolutePath);
-}
-
-function scanDirectory(dir: string, rootDir: string, fileList: ScannedFile[]) {
-  if (fileList.length >= 100) return;
-  const items = fs.readdirSync(dir, { withFileTypes: true });
-  for (const item of items) {
-    const fullPath = path.join(dir, item.name);
-    const rel = getRelativePath(fullPath, rootDir);
-
-    if (item.isDirectory()) {
-      if (['node_modules', '.git', 'dist', 'build', 'bin', 'obj', 'out', '.bak'].includes(item.name)) {
-        continue;
-      }
-      scanDirectory(fullPath, rootDir, fileList);
-    } else if (item.isFile()) {
-      const ext = path.extname(item.name).toLowerCase();
-      if (['.png', '.jpg', '.jpeg', '.gif', '.ico', '.pdf', '.zip', '.tar', '.gz', '.mp4', '.mp3', '.exe', '.dll', '.so', '.dylib', '.woff', '.woff2', '.eot', '.ttf', '.map', '.db', '.sqlite'].includes(ext)) {
-        continue;
-      }
-      try {
-        const stats = fs.statSync(fullPath);
-        if (stats.size > 100 * 1024) continue;
-
-        const content = fs.readFileSync(fullPath, 'utf8');
-        const lines = content.split('\n');
-        fileList.push({
-          relPath: rel,
-          absPath: fullPath,
-          lineCount: lines.length,
-          content: content
-        });
-      } catch (e) {}
-    }
-  }
-}
-
-function buildContextTreeString(rootDir: string, files: ScannedFile[]): string {
-  const treeLines: string[] = [];
-  const projectName = path.basename(rootDir) || 'Project';
-  treeLines.push(`📁 ${projectName}/`);
-
-  const sortedFiles = [...files].sort((a, b) => a.relPath.localeCompare(b.relPath));
-  
-  for (let i = 0; i < sortedFiles.length; i++) {
-    const f = sortedFiles[i];
-    const isLast = i === sortedFiles.length - 1;
-    const prefix = isLast ? '  └─ ' : '  ├─ ';
-    
-    let desc = `${f.lineCount} lines`;
-    if (f.relPath === 'package.json') {
-      try {
-        const pkg = JSON.parse(f.content);
-        const deps = Object.keys(pkg.dependencies || {}).slice(0, 3).join(', ');
-        if (deps) {
-          desc = `deps: ${deps}...`;
-        }
-      } catch (e) {}
-    } else {
-      const commentMatch = f.content.match(/(?:\/\/|#|\/\*)\s*(.*)/);
-      if (commentMatch && commentMatch[1]) {
-        const cleanComment = commentMatch[1].trim().substring(0, 20);
-        if (cleanComment) {
-          desc = `${cleanComment}, ${f.lineCount} lines`;
-        }
-      }
-    }
-    
-    treeLines.push(`${prefix}${f.relPath.padEnd(22)} [${desc}]`);
-  }
-  return treeLines.join('\n');
-}
-
-function getProjectFilesContext(rootDir: string, instruction: string): { contextText: string, fileTree: string } {
-  const files: ScannedFile[] = [];
-  try {
-    scanDirectory(rootDir, rootDir, files);
-  } catch (e) {}
-
-  const tree = buildContextTreeString(rootDir, files);
-
-  let contextText = `Project Structure:\n${tree}\n\n`;
-  
-  let includedCount = 0;
-  for (const f of files) {
-    let shouldInclude = false;
-    const filename = path.basename(f.relPath);
-    
-    if (instruction.toLowerCase().includes(filename.toLowerCase())) {
-      shouldInclude = true;
-    }
-    if (files.length <= 15) {
-      shouldInclude = true;
-    }
-
-    if (shouldInclude && includedCount < 20) {
-      contextText += `--- FILE CONTENT: ${f.relPath} ---\n${f.content}\n\n`;
-      includedCount++;
-    }
-  }
-  return { contextText, fileTree: tree };
-}
-
-function cleanBlockContent(content: string): string {
-  let cleaned = content;
-  if (cleaned.startsWith('\r\n')) {
-    cleaned = cleaned.substring(2);
-  } else if (cleaned.startsWith('\n')) {
-    cleaned = cleaned.substring(1);
-  }
-  if (cleaned.endsWith('\r\n')) {
-    cleaned = cleaned.slice(0, -2);
-  } else if (cleaned.endsWith('\n')) {
-    cleaned = cleaned.slice(0, -1);
-  }
-  return cleaned;
-}
-
-interface FileEdit {
-  filePath: string;
-  searchContent: string;
-  replaceContent: string;
-}
-
-function parseSearchReplaceBlocks(text: string): FileEdit[] {
-  const edits: FileEdit[] = [];
-  const regex = /FILE:\s*([^\r\n]+)[\r\n]+<<<<<<< SEARCH([\s\S]*?)=======([\s\S]*?)>>>>>>>/g;
-  let match;
-  while ((match = regex.exec(text)) !== null) {
-    edits.push({
-      filePath: match[1].trim(),
-      searchContent: match[2],
-      replaceContent: match[3]
-    });
-  }
-  return edits;
-}
-
-function applyOpenRouterEdits(edits: FileEdit[]): { file: string, success: boolean, error?: string }[] {
-  const results: { file: string, success: boolean, error?: string }[] = [];
-  for (const edit of edits) {
-    const absPath = path.resolve(process.cwd(), edit.filePath);
-    try {
-      const dir = path.dirname(absPath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-
-      const searchClean = cleanBlockContent(edit.searchContent);
-      const replaceClean = cleanBlockContent(edit.replaceContent);
-
-      if (!fs.existsSync(absPath)) {
-        if (searchClean !== '') {
-          results.push({ file: edit.filePath, success: false, error: 'File does not exist, but search block is not empty.' });
-          continue;
-        }
-        fs.writeFileSync(absPath, replaceClean, 'utf8');
-        results.push({ file: edit.filePath, success: true });
-      } else {
-        const originalContent = fs.readFileSync(absPath, 'utf8');
-        if (searchClean === '') {
-          fs.writeFileSync(absPath, replaceClean, 'utf8');
-          results.push({ file: edit.filePath, success: true });
-        } else {
-          if (!originalContent.includes(searchClean)) {
-            results.push({
-              file: edit.filePath,
-              success: false,
-              error: `Search block code not found in file. Please ensure exact matches.`
-            });
-            continue;
-          }
-          const updatedContent = originalContent.replace(searchClean, replaceClean);
-          fs.writeFileSync(absPath, updatedContent, 'utf8');
-          results.push({ file: edit.filePath, success: true });
-        }
-      }
-    } catch (e: any) {
-      results.push({ file: edit.filePath, success: false, error: e.message });
-    }
-  }
-  return results;
-}
-
-async function handleChatMode() {
-  const defaultPath = process.cwd();
-  console.log(chalk.cyan(`\n/chatmode → Project Analysis`));
-  const projectPathInput = await askUser(`  Enter project path (default: ${defaultPath}): `);
-  const projectPath = projectPathInput.trim() || defaultPath;
-  
-  if (!fs.existsSync(projectPath) || !fs.statSync(projectPath).isDirectory()) {
-    logger.error('Invalid directory path.');
-    return;
-  }
-
-  const spinner = ora({
-    text: chalk.dim('Scanning project files…'),
-    spinner: 'dots',
-    color: 'white'
-  }).start();
-
-  const files: ScannedFile[] = [];
-  try {
-    scanDirectory(projectPath, projectPath, files);
-  } catch (e: any) {
-    spinner.stop();
-    logger.error(`Scan failed: ${e.message}`);
-    return;
-  }
-  
-  spinner.stop();
-  if (files.length === 0) {
-    logger.error('No readable code files found.');
-    return;
-  }
-
-  const contextTree = buildContextTreeString(projectPath, files);
-  console.log(chalk.bold.yellow('\n📁 Context Tree Scanned:'));
-  console.log(chalk.dim(contextTree));
-  console.log('');
-
-  let codebaseContext = `You are a project analyzer. Here is the codebase context:\n\n`;
-  for (const f of files) {
-    codebaseContext += `--- FILE: ${f.relPath} ---\n${f.content}\n\n`;
-  }
-
-  const systemPrompt = `You are an expert software architect analyzing a codebase.
-Use the scanned codebase context to analyze the project and provide:
-1. Architecture Overview (explain the flow and layout of files)
-2. Code Quality Insights (strengths, styling, documentation)
-3. Bug Patterns Detected (risks, race conditions, edge cases)
-4. Improvement Suggestions (refactoring, optimization)
-
-IMPORTANT:
-- Keep your analysis focused, technical, and highly constructive.
-- Be concise but specific (refer to actual file names and line counts).
-- Under NO circumstances suggest or print file edits that require applying. This is a read-only chat mode.
-`;
-
-  const messages = [
-    { role: 'system', content: systemPrompt },
-    { role: 'user', content: codebaseContext + `\n\nPlease analyze this codebase.` }
-  ];
-
-  const analysisSpinner = ora({
-    text: chalk.dim('Analyzing project context with OpenRouter…'),
-    spinner: 'dots',
-    color: 'white'
-  }).start();
-
-  try {
-    const analysis = await queryOpenRouter(messages, '/chatmode', 'analysis', shellState.abortController.signal);
-    analysisSpinner.stop();
-    console.log(chalk.bold.green('\n=== AI Codebase Analysis ==='));
-    console.log(analysis);
-    console.log(chalk.bold.green('============================\n'));
-    
-    messages.push({ role: 'assistant', content: analysis });
-
-    while (true) {
-      const q = await askUser(chalk.bold.cyan('chatmode » Ask a question (or type /exit): '));
-      const trimmedQ = q.trim();
-      if (trimmedQ === '/exit' || trimmedQ === '') {
-        console.log(chalk.yellow('Exiting chatmode.'));
-        break;
-      }
-      
-      messages.push({ role: 'user', content: trimmedQ });
-      
-      const qSpinner = ora({
-        text: chalk.dim('Generating response…'),
-        spinner: 'dots',
-        color: 'white'
-      }).start();
-
-      try {
-        const ans = await queryOpenRouter(messages, '/chatmode', 'query', shellState.abortController.signal);
-        qSpinner.stop();
-        console.log(chalk.bold.green('\nAI:'));
-        console.log(ans);
-        console.log('');
-        messages.push({ role: 'assistant', content: ans });
-      } catch (err: any) {
-        qSpinner.stop();
-        logger.error(`Request failed: ${err.message}`);
-      }
-    }
-  } catch (err: any) {
-    analysisSpinner.stop();
-    logger.error(`Analysis failed: ${err.message}`);
-  }
-}
-
-async function handleOpenRouterEdit(instruction: string) {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    logger.error('OPENROUTER_API_KEY is not set. Please set it in your .env file.');
-    return;
-  }
-
-  const spinner = ora({
-    text: chalk.dim('Scanning project context…'),
-    spinner: 'dots',
-    color: 'white'
-  }).start();
-
-  const rootDir = process.cwd();
-  const { contextText, fileTree } = getProjectFilesContext(rootDir, instruction);
-  spinner.stop();
-
-  const messages = [
-    { role: 'system', content: EDIT_SYSTEM_PROMPT },
-    { role: 'user', content: `${contextText}\nUser Instruction: ${instruction}` }
-  ];
-
-  const editSpinner = ora({
-    text: chalk.dim('Generating plan from OpenRouter…'),
-    spinner: 'dots',
-    color: 'white'
-  }).start();
-
-  try {
-    const cmdName = currentMode === 'plan' ? '/plan' : '/fast';
-    const responseText = await queryOpenRouter(messages, cmdName, instruction.substring(0, 20), shellState.abortController.signal);
-    editSpinner.stop();
-
-    const edits = parseSearchReplaceBlocks(responseText);
-    
-    if (edits.length === 0) {
-      console.log(chalk.bold.yellow('\n=== OpenRouter Response ==='));
-      console.log(responseText);
-      console.log(chalk.bold.yellow('==========================='));
-      logger.info('No file changes were requested in this response.');
-      return;
-    }
-
-    console.log(chalk.bold.yellow('\nProposed Edits:'));
-    for (const edit of edits) {
-      console.log(`  ${chalk.cyan(edit.filePath)}:`);
-      const searchClean = cleanBlockContent(edit.searchContent);
-      const replaceClean = cleanBlockContent(edit.replaceContent);
-      if (searchClean === '') {
-        console.log(chalk.green(`    + Create/Overwrite file`));
-      } else {
-        console.log(chalk.red(`    - Search block: ${searchClean.split('\n').length} lines`));
-        console.log(chalk.green(`    + Replace block: ${replaceClean.split('\n').length} lines`));
-      }
-    }
-    console.log('');
-
-    let shouldApply = true;
-    if (currentMode === 'plan') {
-      const ans = await askUser('Do you want to apply these changes? (y/n): ');
-      if (ans.trim().toLowerCase() !== 'y') {
-        shouldApply = false;
-        logger.info('Edits discarded.');
-      }
-    }
-
-    if (shouldApply) {
-      const applyResults = applyOpenRouterEdits(edits);
-      let successCount = 0;
-      for (const res of applyResults) {
-        if (res.success) {
-          logger.success(`Applied changes to: ${chalk.bold(res.file)}`);
-          successCount++;
-        } else {
-          logger.error(`Failed to modify ${chalk.bold(res.file)}: ${res.error}`);
-        }
-      }
-      if (successCount === edits.length) {
-        logger.success('All edits applied successfully.');
-      }
-    }
-  } catch (err: any) {
-    editSpinner.stop();
-    logger.error(`Edit failed: ${err.message}`);
-  }
-}
 
 async function handleUsageCommand() {
   const spinner = ora({ text: chalk.dim('Fetching session data…'), spinner: 'dots', color: 'white' }).start();
@@ -4640,12 +3736,12 @@ async function startShell() {
     if (cols >= 60) {
       console.log(chalk.bold.white(figletFullText));
       console.log(chalk.bold.white('\n                JULES  C L I   —  research preview Developer: Rev'));
-      console.log(chalk.bold.white('                Version: 2.5'));
+      console.log(chalk.bold.white('                Version: 2.0'));
     } else if (cols >= 40) {
       console.log(chalk.bold.white('[ JULES CLI ] ') + chalk.dim('— research preview Developer: Rev'));
-      console.log(chalk.bold.white('                Version: 2.5'));
+      console.log(chalk.bold.white('                Version: 2.0'));
     } else {
-      console.log(chalk.bold.white('JULES CLI — Rev v2.5'));
+      console.log(chalk.bold.white('JULES CLI — Rev v2.0'));
     }
   }
 
@@ -4711,13 +3807,13 @@ async function startShell() {
     logger.success(`Automatically switched to new project: ${projectName}`);
   }
 
-  await printBanner(projectName, branch, isOpenMode ? 'OPEN MODE (' + openRouterModel + ')' : currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
+  await printBanner(projectName, branch, currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
 
   console.log(chalk.bold.white('  Tips for getting started:'));
   console.log(chalk.white('  1. Run ') + chalk.bold.cyan('/init') + chalk.white(' to link this directory to a shadow repository'));
   console.log(chalk.white('  2. Type your coding instruction and press ') + chalk.bold('Enter') + chalk.white(' to edit files\n'));
 
-  const commandsList = ['/init', '/newrepo', '/repo', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/diff', '/revert', '/help', '/docs', '/shot', '/deleteworkspace', '/exit', '/open', '/exitmode', '/model', '/freemodels', '/chatmode'];
+  const commandsList = ['/init', '/newrepo', '/repo', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/diff', '/revert', '/help', '/docs', '/shot', '/deleteworkspace', '/exit'];
 
   const PROMPT_STR = '> ';
   const PROMPT_LEN = PROMPT_STR.length;
@@ -4748,7 +3844,6 @@ async function startShell() {
   } catch (e) {}
 
   let activeBottomLines = 0;
-  let lastDrawnBottomText = '';
   let cyclingIndex = -1;
   let originalLine = '';
   let activeMatches: string[] = [];
@@ -4777,49 +3872,68 @@ async function startShell() {
     return true;
   };
 
-  const clearBottomArea = () => {};
+  const clearBottomArea = () => {
+    if (activeBottomLines === 0) return;
+    const currentPrompt = (rl as any)._prompt || '';
+    const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
+    const actualPromptLen = cleanPrompt.length;
+    const col = actualPromptLen + rl.cursor;
 
-  const clearBottomAreaOnEnter = () => {};
+    // Save current position, move to prompt column, clear everything below
+    readline.cursorTo(process.stdout, col);
+    readline.clearScreenDown(process.stdout);
+    activeBottomLines = 0;
+  };
 
-  const drawBottomArea = (matches: string[] = []) => { (rl as any)._refreshLine(); };
-  hookReadlineFooter(rl, () => {
+  const clearBottomAreaOnEnter = () => {
+    if (activeBottomLines === 0) return;
+    // When Enter is pressed, the cursor is at the end of the input line.
+    // We just need to clear everything below it.
+    readline.clearScreenDown(process.stdout);
+    activeBottomLines = 0;
+  };
+
+  const drawBottomArea = (matches: string[] = []) => {
     const rows = process.stdout.rows || 24;
     const cols = process.stdout.columns || 80;
 
     // Lower threshold for mobile/small screens
     if (rows < 3 || cols < 15) {
+      clearBottomArea();
       shellState.isBottomAreaRendered = false;
-      return [];
+      return;
     }
+    shellState.isBottomAreaRendered = true;
+    clearBottomArea();
 
     const lines: string[] = [];
     const isCompact = rows < 12;
 
     if (isCompact) {
       lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
-      if (activeMatches.length > 0) {
+      if (matches.length > 0) {
         const prefix = '  ⎿ ';
-        const styledMatches = activeMatches.map((m, idx) => 
+        const styledMatches = matches.map((m, idx) => 
           idx === cyclingIndex ? chalk.bold.white(m) : chalk.dim(m)
         );
         const itemSeparator = '  ';
         let plainText = prefix;
         let keepCount = 0;
-        for (let i = 0; i < activeMatches.length; i++) {
-          const item = activeMatches[i];
+        for (let i = 0; i < matches.length; i++) {
+          const item = matches[i];
           const nextLength = plainText.length + (i > 0 ? itemSeparator.length : 0) + item.length;
           if (nextLength > cols - 8) break;
           plainText += (i > 0 ? itemSeparator : '') + item;
           keepCount++;
         }
-        if (keepCount === 0 && activeMatches.length > 0) keepCount = 1;
+        if (keepCount === 0 && matches.length > 0) keepCount = 1;
         const displayMatches = styledMatches.slice(0, keepCount);
         let formattedText = chalk.dim(prefix) + displayMatches.join(chalk.dim(itemSeparator));
-        if (keepCount < activeMatches.length) formattedText += chalk.dim('  …');
+        if (keepCount < matches.length) formattedText += chalk.dim('  …');
         lines.push(formattedText);
       } else {
         const projectName = path.basename(process.cwd());
-        const mode = isOpenMode ? 'OPEN' : currentMode.toUpperCase();
+        const mode = currentMode.toUpperCase();
         const shortHeader = `⚙️  ${projectName} [${mode}]`;
         lines.push(chalk.cyan('  ' + (shortHeader.length > cols - 4 ? shortHeader.substring(0, cols - 7) + '...' : shortHeader)));
       }
@@ -4827,7 +3941,7 @@ async function startShell() {
       lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
 
       const projectName = path.basename(process.cwd());
-      const mode = isOpenMode ? `OPEN MODE (${openRouterModel})` : currentMode.toUpperCase();
+      const mode = currentMode.toUpperCase();
       
       const headerContent = `⚙️  JULES-CLI | 📁 ${projectName} [🌿 ${cachedBranch}] | ⚡ MODE: ${mode}`;
       let truncatedHeader = headerContent;
@@ -4843,9 +3957,9 @@ async function startShell() {
       lines.push(chalk.cyan(truncatedHeader));
       lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
 
-      if (activeMatches.length > 0) {
+      if (matches.length > 0) {
         const prefix = '  ⎿ ';
-        const styledMatches = activeMatches.map((m, idx) => 
+        const styledMatches = matches.map((m, idx) => 
           idx === cyclingIndex ? chalk.bold.white(m) : chalk.dim(m)
         );
 
@@ -4853,8 +3967,8 @@ async function startShell() {
         let plainText = prefix;
         let keepCount = 0;
 
-        for (let i = 0; i < activeMatches.length; i++) {
-          const item = activeMatches[i];
+        for (let i = 0; i < matches.length; i++) {
+          const item = matches[i];
           const nextLength = plainText.length + (i > 0 ? itemSeparator.length : 0) + item.length;
           if (nextLength > cols - 8) {
             break;
@@ -4863,27 +3977,23 @@ async function startShell() {
           keepCount++;
         }
 
-        if (keepCount === 0 && activeMatches.length > 0) {
+        if (keepCount === 0 && matches.length > 0) {
           keepCount = 1;
         }
 
         const displayMatches = styledMatches.slice(0, keepCount);
         let formattedText = chalk.dim(prefix) + displayMatches.join(chalk.dim(itemSeparator));
-        if (keepCount < activeMatches.length) {
+        if (keepCount < matches.length) {
           formattedText += chalk.dim('  …');
         }
 
         lines.push(formattedText);
       }
 
-      const tipsContent = isOpenMode
-        ? `💡 Tips: \`/exitmode\` to leave Open Mode  •  \`/model\` to pick model  •  \`/session\` for live panel`
-        : `💡 Tips: \`/init\` to link repo  •  \`/help\` for commands  •  \`/exit\` to quit`;
+      const tipsContent = `💡 Tips: \`/init\` to link repo  •  \`/help\` for commands  •  \`/exit\` to quit`;
       let truncatedTips = tipsContent;
       if (truncatedTips.length > cols - 2) {
-        truncatedTips = isOpenMode
-          ? `💡 Tips: /exitmode • /model • /session`
-          : `💡 Tips: /init • /help • /exit`;
+        truncatedTips = `💡 Tips: /init • /help • /exit`;
         if (truncatedTips.length > cols - 2) {
           truncatedTips = truncatedTips.substring(0, cols - 5) + '...';
         }
@@ -4892,8 +4002,20 @@ async function startShell() {
       lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
     }
 
-    return lines;
-  });
+    const currentPrompt = (rl as any)._prompt || '';
+    const cleanPrompt = currentPrompt.replace(/\u001b\[[0-9;]*m/g, '');
+    const actualPromptLen = cleanPrompt.length;
+    let col = actualPromptLen + rl.cursor;
+    if (isNaN(col)) col = 0;
+
+    for (const line of lines) {
+      process.stdout.write(`\n\r\u001b[2K${line}`);
+    }
+
+    activeBottomLines = lines.length;
+    readline.moveCursor(process.stdout, 0, -activeBottomLines);
+    readline.cursorTo(process.stdout, col);
+  };
 
   const showPrompt = () => {
     shellState.escCancelled = false;
@@ -5568,7 +4690,7 @@ async function startShell() {
       shellState.trackedSessionId = null;
       shellState.trackedSessionUrl = null;
       logger.success(`Automatically switched to new project: ${projectName}`);
-      await printBanner(projectName, branch, isOpenMode ? 'OPEN MODE (' + openRouterModel + ')' : currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
+      await printBanner(projectName, branch, currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
     }
 
     const input = substitutedLine.trim();
@@ -5622,11 +4744,7 @@ async function startShell() {
         // Direct chat mode: treat the whole line as an instruction
         try {
           if (!(rl as any).closed) rl.pause();
-          if (isOpenMode) {
-            await handleOpenRouterEdit(finalInput);
-          } else {
-            await handleEdit(finalInput);
-          }
+          await handleEdit(finalInput);
         } finally {
           if (!(rl as any).closed) rl.resume();
           if (shellState.keypressHandler) {
@@ -5763,7 +4881,7 @@ async function startShell() {
               const branch = await getCurrentBranch();
               const newStatus = getWorkspaceStatus();
               projectName = newStatus.projectName || selectedProject;
-              await printBanner(projectName, branch || 'main', isOpenMode ? 'OPEN MODE (' + openRouterModel + ')' : currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
+              await printBanner(projectName, branch || 'main', currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
             } else {
               logger.error('Invalid selection.');
             }
@@ -5809,11 +4927,7 @@ async function startShell() {
           } else {
             try {
               if (!(rl as any).closed) rl.pause();
-              if (isOpenMode) {
-                await handleOpenRouterEdit(args.join(' '));
-              } else {
-                await handleEdit(args.join(' '));
-              }
+              await handleEdit(args.join(' '));
             } finally {
               if (!(rl as any).closed) rl.resume();
             }
@@ -5828,119 +4942,20 @@ async function startShell() {
           }
           break;
         case '/session':
-          if (isOpenMode) {
-            drawOpenModeActivityPanel();
-          } else {
-            try {
-              if (!(rl as any).closed) rl.pause();
-              await handleSessionCommand(args);
-            } finally {
-              if (!(rl as any).closed) rl.resume();
-            }
+          try {
+            if (!(rl as any).closed) rl.pause();
+            await handleSessionCommand(args);
+          } finally {
+            if (!(rl as any).closed) rl.resume();
           }
           break;
         case '/plan':
-          if (isOpenMode) {
-            if (args.length > 0) {
-              const oldMode = currentMode;
-              currentMode = 'plan';
-              try {
-                if (!(rl as any).closed) rl.pause();
-                await handleOpenRouterEdit(args.join(' '));
-              } finally {
-                if (!(rl as any).closed) rl.resume();
-                currentMode = oldMode;
-              }
-            } else {
-              currentMode = 'plan';
-              logger.success('Switched to PLAN mode via OpenRouter (Confirmation required).');
-            }
-          } else {
-            currentMode = 'plan';
-            logger.success('Switched to PLAN mode (Manual plan approval required).');
-          }
+          currentMode = 'plan';
+          logger.success('Switched to PLAN mode (Manual plan approval required).');
           break;
         case '/fast':
-          if (isOpenMode) {
-            if (args.length > 0) {
-              const oldMode = currentMode;
-              currentMode = 'fast';
-              try {
-                if (!(rl as any).closed) rl.pause();
-                await handleOpenRouterEdit(args.join(' '));
-              } finally {
-                if (!(rl as any).closed) rl.resume();
-                currentMode = oldMode;
-              }
-            } else {
-              currentMode = 'fast';
-              logger.success('Switched to FAST mode via OpenRouter (Auto-apply enabled).');
-            }
-          } else {
-            currentMode = 'fast';
-            logger.success('Switched to FAST mode (Automatic plan approval enabled).');
-          }
-          break;
-        case '/open':
-          dotenv.config({ override: true });
-          const apiKey = process.env.OPENROUTER_API_KEY;
-          if (!apiKey) {
-            console.log(chalk.bold.red('\n  .env Setup Guide (Missing OPENROUTER_API_KEY):'));
-            console.log(chalk.dim('  Please set the following environment variables in your .env file:'));
-            console.log(chalk.yellow('  OPENROUTER_API_KEY=sk-or-v1-xxxxxxx'));
-            console.log(chalk.yellow('  OPENROUTER_DEFAULT_MODEL=qwen/qwen3-coder:free\n'));
-            logger.error('Could not activate Open Mode. OPENROUTER_API_KEY is not set.');
-          } else {
-            isOpenMode = true;
-            openRouterModel = process.env.OPENROUTER_DEFAULT_MODEL || 'nex-agi/nex-n2-pro:free';
-            logger.success('OPEN MODE ACTIVE ✓');
-            logger.info('All commands now route → OpenRouter');
-            logger.info(`Active Model: ${chalk.bold(openRouterModel)}`);
-          }
-          break;
-        case '/exitmode':
-          if (!isOpenMode) {
-            logger.info('Already in Jules AI mode.');
-          } else {
-            isOpenMode = false;
-            logger.success('Switched back to Jules AI mode.');
-          }
-          break;
-        case '/model':
-          if (!isOpenMode) {
-            logger.error('This command is only available in Open Mode (/open).');
-          } else {
-            try {
-              if (!(rl as any).closed) rl.pause();
-              await handleModelCommand();
-            } finally {
-              if (!(rl as any).closed) rl.resume();
-            }
-          }
-          break;
-        case '/freemodels':
-          if (!isOpenMode) {
-            logger.error('This command is only available in Open Mode (/open).');
-          } else {
-            try {
-              if (!(rl as any).closed) rl.pause();
-              await handleFreemodelsCommand();
-            } finally {
-              if (!(rl as any).closed) rl.resume();
-            }
-          }
-          break;
-        case '/chatmode':
-          if (!isOpenMode) {
-            logger.error('This command is only available in Open Mode (/open).');
-          } else {
-            try {
-              if (!(rl as any).closed) rl.pause();
-              await handleChatMode();
-            } finally {
-              if (!(rl as any).closed) rl.resume();
-            }
-          }
+          currentMode = 'fast';
+          logger.success('Switched to FAST mode (Automatic plan approval enabled).');
           break;
         case '/docs':
           await handleDocs();
@@ -6001,44 +5016,46 @@ async function startShell() {
         case '/help':
           console.log('');
           console.log(chalk.bold.white('  Commands:'));
-          const cmdData = [
-            ['/init', 'Init git & link shadow'],           ['/clear', 'Clear terminal'],
-            ['/newrepo', 'Create GitHub repo'],            ['/diff [args]', 'Git diff'],
-            ['/repo', 'Switch/Create projects'],           ['/revert [args]', 'Undo action'],
-            ['/sync', 'Push to GitHub'],                   ['/open', 'Activate Open Mode'],
-            ['/edit [prompt]', 'AI code edit'],            ['/exitmode', 'Exit Open Mode'],
-            ['/restore', 'Restore backups'],               ['/model', 'Change active model'],
-            ['/session', 'Manage sessions'],               ['/freemodels', 'Free Open Models'],
-            ['/usage', 'Token usage stats'],               ['/chatmode', 'Project file chat'],
-            ['/plan', 'Manual plan mode'],                 ['/help', 'Show this menu'],
-            ['/fast', 'Auto plan mode (default)'],         ['/exit', 'Quit'],
-            ['/docs', 'Documentation'],                    ['', ''],
-            ['/shot', 'Keyboard shortcuts'],               ['', ''],
-            ['/deleteworkspace', 'Delete workspace'],      ['', '']
-          ];
-          for (let i = 0; i < cmdData.length; i += 2) {
-            const left = cmdData[i];
-            const right = cmdData[i+1];
-            if (!left) break;
-            const leftStr = `    ${chalk.bold.cyan(left[0].padEnd(18))} ${chalk.dim(left[1].padEnd(25))}`;
-            const rightStr = right && right[0] ? `${chalk.bold.cyan(right[0].padEnd(16))} ${chalk.dim(right[1])}` : '';
-            console.log(leftStr + rightStr);
-          }
+          const cmd = (c: string, desc: string) => {
+            console.log(`    ${chalk.bold.cyan(c.padEnd(28))} ${chalk.dim(desc)}`);
+          };
+
+          cmd('/init',                   'Initialize git & link shadow repo');
+          cmd('/newrepo',                'Create new empty private GitHub repo');
+          cmd('/repo',                   'Create GitHub repo or switch projects');
+          cmd('/sync',                   'Push local changes to GitHub');
+          cmd('/edit [prompt]',          'Ask Jules AI to edit your code');
+          cmd('/restore',                'Restore files from .bak backups');
+          cmd('/session [ls|rm|track]',  'List, delete or track sessions');
+          cmd('/usage',                  "Today's stats & all-time summary");
+          cmd('/plan',                   'Switch to manual plan mode');
+          cmd('/fast',                   'Switch to auto plan mode (default)');
+          cmd('/docs',                   'Full documentation');
+          cmd('/shot',                   'Show keyboard shortcuts manual');
+          cmd('/deleteworkspace',        'Delete workspace and restart');
+          cmd('/clear',                  'Clear terminal');
+          cmd('/diff [args]',            'Show git diff of changes');
+          cmd('/revert [args]',          'Undo last Jules action/commit');
+          cmd('/help',                   'Show this menu');
+          cmd('/exit',                   'Quit');
           console.log('');
           console.log(chalk.dim('  Or just type your instruction and press Enter'));
           console.log('');
-          console.log(chalk.bold.white('  Project Information & Links:'));
-          console.log(`    ${chalk.bold.cyan('GitHub'.padEnd(14))} ${chalk.dim('https://github.com/v54087912-collab/Jules-CLI.git')}`);
-          console.log(`    ${chalk.bold.cyan('Developer'.padEnd(14))} ${chalk.dim('https://t.me/R3V_X')}`);
-          console.log(`    ${chalk.bold.cyan('Community'.padEnd(14))} ${chalk.dim('https://t.me/allinformation0173')}`);
-          console.log(`    ${chalk.bold.cyan('Instagram'.padEnd(14))} ${chalk.dim('https://www.instagram.com/opeditzxx/')}`);
+          console.log(chalk.bold.white('  Project Information:'));
+          console.log(`    ${chalk.bold.cyan('Open Source'.padEnd(28))} ${chalk.dim('Jules CLI is an Open Source project')}`);
+          console.log(`    ${chalk.bold.cyan('GitHub'.padEnd(28))} ${chalk.dim('https://github.com/v54087912-collab/Jules-CLI.git')}`);
+          console.log('');
+          console.log(chalk.bold.white('  Support & Links:'));
+          console.log(`    ${chalk.bold.cyan('Developer'.padEnd(28))} ${chalk.dim('https://t.me/R3V_X')}`);
+          console.log(`    ${chalk.bold.cyan('Community'.padEnd(28))} ${chalk.dim('https://t.me/allinformation0173')}`);
+          console.log(`    ${chalk.bold.cyan('Instagram'.padEnd(28))} ${chalk.dim('https://www.instagram.com/opeditzxx/')}`);
           console.log('');
           break;
         case '/clear':
           console.clear();
           branch = await getCurrentBranch() || 'main';
           shadowUrl = await getRemoteUrl();
-          await printBanner(projectName, branch, isOpenMode ? 'OPEN MODE (' + openRouterModel + ')' : currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl, false, true);
+          await printBanner(projectName, branch, currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl, false, true);
           break;
         case '/diff':
           try {
@@ -6083,9 +5100,6 @@ async function startShell() {
     if (shellState.isTaskActive) {
       return;
     }
-    // Validation bypass comments:
-    // process.stdout.write('\u001b[H')
-    // printBanner(projectName, branch, currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl, true);
     activeBottomLines = 0; // Reset before drawing
     if (shellState.activeRl && !(shellState.activeRl as any).closed) {
       shellState.activeRl.prompt(true);
@@ -6136,7 +5150,7 @@ async function startShell() {
 program
   .name('jules-local')
   .description('Bridge between local files and Google Jules API')
-  .version('2.5');
+  .version('2.0');
 
 program
   .command('init')
@@ -6227,7 +5241,7 @@ program
 // If no arguments, start shell
 if (require.main === module) {
   // 1. Load .env
-  dotenv.config({ override: true });
+  dotenv.config();
 
   // 2. Auto-append missing fields if needed
   ensureEnvFields();

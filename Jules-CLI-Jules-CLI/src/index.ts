@@ -1312,7 +1312,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
       const line = rl!.line;
       let newMatches: string[] = [];
       if (line.startsWith('/')) {
-        newMatches = ['/init', '/newrepo', '/repo', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/diff', '/revert', '/help', '/docs', '/shot', '/deleteworkspace', '/exit', '/open', '/exitmode', '/model', '/freemodels', '/chatmode'].filter(c => c.startsWith(line));
+        newMatches = ['/init', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/diff', '/revert', '/help', '/docs', '/shot', '/exit'].filter(c => c.startsWith(line));
         if (newMatches.length > 0 && line === newMatches[0]) {
           newMatches = [];
         }
@@ -3163,12 +3163,12 @@ async function startShell() {
     if (cols >= 60) {
       console.log(chalk.bold.white(figletFullText));
       console.log(chalk.bold.white('\n                JULES  C L I   —  research preview Developer: Rev'));
-      console.log(chalk.bold.white('                Version: 2.5'));
+      console.log(chalk.bold.white('                Version: 2.0'));
     } else if (cols >= 40) {
       console.log(chalk.bold.white('[ JULES CLI ] ') + chalk.dim('— research preview Developer: Rev'));
-      console.log(chalk.bold.white('                Version: 2.5'));
+      console.log(chalk.bold.white('                Version: 2.0'));
     } else {
-      console.log(chalk.bold.white('JULES CLI — Rev v2.5'));
+      console.log(chalk.bold.white('JULES CLI — Rev v2.0'));
     }
   }
 
@@ -4413,11 +4413,6 @@ async function startShell() {
           cmd('/clear',                  'Clear terminal');
           cmd('/diff [args]',            'Show git diff of changes');
           cmd('/revert [args]',          'Undo last Jules action/commit');
-          cmd('/open',                   'Activate Open Mode (routes requests to OpenRouter)');
-          cmd('/exitmode',               'Exit Open Mode and switch back to Jules AI');
-          cmd('/model',                  'Select/change active model in Open Mode');
-          cmd('/freemodels',             'Select a free model in Open Mode');
-          cmd('/chatmode',               'Scan project files and chat (Open Mode)');
           cmd('/help',                   'Show this menu');
           cmd('/exit',                   'Quit');
           console.log('');
@@ -4525,7 +4520,7 @@ async function startShell() {
 program
   .name('jules-local')
   .description('Bridge between local files and Google Jules API')
-  .version('2.5');
+  .version('2.0');
 
 program
   .command('init')

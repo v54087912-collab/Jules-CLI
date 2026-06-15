@@ -32,6 +32,7 @@ Create a `.env` file with these keys:
 - `GITHUB_TOKEN`: Your GitHub Personal Access Token.
 - `GITHUB_USER`: your_github_username_here
 - `GITHUB_EMAIL`: [your_github_Email_username_here]@users.noreply.github.com
+- `OPENROUTER_API`: Your OpenRouter API key.
 
 ### **2. Generate JULES_API_KEY**
 - Visit the **[Jules Settings Page](https://jules.google.com/settings#api)**.
@@ -40,6 +41,10 @@ Create a `.env` file with these keys:
 ### **3. Generate GITHUB_TOKEN**
 - Go to GitHub -> **Settings** -> **Developer settings** -> **Personal access tokens** -> **Tokens (classic)**.
 - Generate a new token with the **`repo`** scope (Full control of private repositories).
+
+### **4. Generate OPENROUTER_API**
+- Visit the **[OpenRouter Keys Page](https://openrouter.ai/keys)**.
+- Click **"Create Key"** and copy your generated API key.
 
 ---
 

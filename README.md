@@ -85,6 +85,7 @@ JULES_API_KEY=your_key_here
 GITHUB_TOKEN=your_token_here
 GITHUB_USER=your_github_username_here
 GITHUB_EMAIL=[your_github_Email_username_here]@users.noreply.github.com
+OPENROUTER_API=Paste_your_OpenRouter_Api_Here
 ```
 
 #### **Generate JULES_API_KEY**
@@ -94,6 +95,10 @@ GITHUB_EMAIL=[your_github_Email_username_here]@users.noreply.github.com
 #### **Generate GITHUB_TOKEN**
 - Go to GitHub -> **Settings** -> **Developer settings** -> **Personal access tokens** -> **Tokens (classic)**.
 - Generate a new token with the **`repo`** scope (Full control of private repositories).
+
+#### **Generate OPENROUTER_API**
+- Visit the **[OpenRouter Keys Page](https://openrouter.ai/keys)**.
+- Click **"Create Key"** and copy your generated API key.
 
 ---
 
