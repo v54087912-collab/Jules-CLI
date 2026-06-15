@@ -5892,7 +5892,7 @@ async function startShell() {
             logger.error('Could not activate Open Mode. OPENROUTER_API_KEY is not set.');
           } else {
             isOpenMode = true;
-            openRouterModel = process.env.OPENROUTER_DEFAULT_MODEL || 'meta-llama/llama-3.3-70b-instruct:free';
+            openRouterModel = process.env.OPENROUTER_DEFAULT_MODEL || 'nex-agi/nex-n2-pro:free';
             logger.success('OPEN MODE ACTIVE ✓');
             logger.info('All commands now route → OpenRouter');
             logger.info(`Active Model: ${chalk.bold(openRouterModel)}`);
