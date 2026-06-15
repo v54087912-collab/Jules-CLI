@@ -13,6 +13,7 @@ import fs from 'fs';
 import { bridgePathsInText, restoreExternalMappedFiles } from './bridge';
 import { execSync, spawn } from 'child_process';
 import dotenv from 'dotenv';
+import axios from 'axios';
 
 async function sendJulesMessage(sessionId: string, prompt: string, signal?: AbortSignal) {
   await apiSendJulesMessage(sessionId, prompt, signal);
@@ -3100,6 +3101,733 @@ async function handleEdit(instruction: string) {
 }
 
 
+
+let isOpenMode = false;
+let openRouterModel = 'deepseek/deepseek-coder:free';
+
+const OPENROUTER_STATS_FILE = path.join(process.env.HOME || process.env.USERPROFILE || '.', '.jules_openrouter_stats.json');
+
+interface OpenRouterStats {
+  requestsToday: number;
+  tokensToday: number;
+  lastResetDate: string;
+}
+
+function loadOpenRouterStats(): OpenRouterStats {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  if (fs.existsSync(OPENROUTER_STATS_FILE)) {
+    try {
+      const stats = JSON.parse(fs.readFileSync(OPENROUTER_STATS_FILE, 'utf8'));
+      if (stats.lastResetDate === todayStr) {
+        return stats;
+      }
+    } catch (e) {}
+  }
+  return {
+    requestsToday: 0,
+    tokensToday: 0,
+    lastResetDate: todayStr
+  };
+}
+
+function saveOpenRouterStats(stats: OpenRouterStats) {
+  try {
+    fs.writeFileSync(OPENROUTER_STATS_FILE, JSON.stringify(stats, null, 2));
+  } catch (e) {
+    logger.warn('Failed to save OpenRouter statistics.');
+  }
+}
+
+interface OpenModeActivity {
+  command: string;
+  query: string;
+  tokens: number;
+  cost: number;
+}
+let openModeSessionActivities: OpenModeActivity[] = [];
+let lastResponseLatency = 0.0;
+let lastResponseSpeed = 0;
+
+const PAID_MODELS = [
+  {
+    name: 'anthropic/claude-sonnet-4-6',
+    id: 'anthropic/claude-3.5-sonnet',
+    context: '200k tokens',
+    inputPrice: 3.00,
+    outputPrice: 15.00,
+    speed: '~85 tok/sec',
+    isFree: false
+  },
+  {
+    name: 'openai/gpt-4o',
+    id: 'openai/gpt-4o',
+    context: '128k tokens',
+    inputPrice: 5.00,
+    outputPrice: 15.00,
+    speed: '~110 tok/sec',
+    isFree: false
+  }
+];
+
+const FREE_MODELS = [
+  {
+    name: 'deepseek/deepseek-coder:free',
+    id: 'deepseek/deepseek-coder:free',
+    context: '64k tokens',
+    inputPrice: 0.00,
+    outputPrice: 0.00,
+    speed: '~94 tok/sec',
+    isFree: true,
+    bestFor: 'Coding, debugging',
+    limits: '20 req/min, 200 req/day'
+  },
+  {
+    name: 'meta-llama/llama-3.1-8b-instruct:free',
+    id: 'meta-llama/llama-3.1-8b-instruct:free',
+    context: '131k tokens',
+    inputPrice: 0.00,
+    outputPrice: 0.00,
+    speed: '~110 tok/sec',
+    isFree: true,
+    bestFor: 'General chat, summarization',
+    limits: '20 req/min, 200 req/day'
+  }
+];
+
+const EDIT_SYSTEM_PROMPT = `You are Antigravity, a professional AI coding assistant.
+Your task is to modify the local codebase based on the user's instructions.
+
+First, analyze the project structure and read-only context.
+When you need to modify files, write your modifications using Search/Replace blocks.
+Each block must specify the file path and contain the exact code to search for, followed by the replacement code.
+
+Format each edit block exactly like this:
+
+FILE: path/to/file.ext
+<<<<<<< SEARCH
+[exact lines of code to search for]
+=======
+[replacement lines of code]
+>>>>>>>
+
+Rules:
+1. Make sure to specify the file path relative to the project root after "FILE: ".
+2. The SEARCH block must match the existing code EXACTLY, including indentation, spaces, and line breaks.
+3. If you want to create a new file, specify "FILE: path/to/newfile.ext", leave the SEARCH block empty, and place the full contents in the REPLACE block.
+4. Keep other explanations brief. Focus on making clean, precise edits.
+`;
+
+function printBoxLine(content: string, colorFn: any) {
+  const cleanLen = content.replace(/\x1b\[[0-9;]*m/g, '').length;
+  const padding = 45 - cleanLen;
+  if (padding > 0) {
+    console.log(colorFn('│ ') + content + ' '.repeat(padding - 1) + colorFn('│'));
+  } else {
+    console.log(colorFn('│ ') + content.substring(0, 43) + colorFn('│'));
+  }
+}
+
+function printPaidModels() {
+  console.log(chalk.bold.cyan('┌─────────────────────────────────────────────┐'));
+  console.log(chalk.bold.cyan('│  📦 PAID MODELS — OpenRouter                │'));
+  console.log(chalk.bold.cyan('├─────────────────────────────────────────────┤'));
+  for (let i = 0; i < PAID_MODELS.length; i++) {
+    const m = PAID_MODELS[i];
+    printBoxLine(`[${i + 1}] ${m.name}`, chalk.cyan);
+    printBoxLine(`    Context : ${m.context}`, chalk.cyan);
+    printBoxLine(`    Input   : $${m.inputPrice.toFixed(2)} / 1M tokens`, chalk.cyan);
+    printBoxLine(`    Output  : $${m.outputPrice.toFixed(2)} / 1M tokens`, chalk.cyan);
+    printBoxLine(`    Speed   : ${m.speed}`, chalk.cyan);
+    if (i < PAID_MODELS.length - 1) {
+      console.log(chalk.bold.cyan('├─────────────────────────────────────────────┤'));
+    }
+  }
+  console.log(chalk.bold.cyan('└─────────────────────────────────────────────┘'));
+}
+
+function printFreeModels() {
+  console.log(chalk.bold.cyan('┌─────────────────────────────────────────────┐'));
+  console.log(chalk.bold.cyan('│  🆓 FREE MODELS — OpenRouter                │'));
+  console.log(chalk.bold.cyan('├─────────────────────────────────────────────┤'));
+  for (let i = 0; i < FREE_MODELS.length; i++) {
+    const m = FREE_MODELS[i];
+    printBoxLine(`[${i + 1}] ${m.name}`, chalk.cyan);
+    printBoxLine(`    Context : ${m.context}`, chalk.cyan);
+    printBoxLine(`    Cost    : FREE ✓`, chalk.cyan);
+    printBoxLine(`    Best for: ${m.bestFor || ''}`, chalk.cyan);
+    printBoxLine(`    Limits  : ${m.limits || ''}`, chalk.cyan);
+    if (i < FREE_MODELS.length - 1) {
+      console.log(chalk.bold.cyan('├─────────────────────────────────────────────┤'));
+    }
+  }
+  console.log(chalk.bold.cyan('└─────────────────────────────────────────────┘'));
+}
+
+async function handleModelCommand() {
+  printPaidModels();
+  const choice = await askUser('  Select model [1-N] or /back : ');
+  const trimmed = choice.trim();
+  if (trimmed === '/back' || trimmed === '') {
+    logger.info('Model selection cancelled.');
+    return;
+  }
+  const idx = parseInt(trimmed, 10);
+  if (isNaN(idx) || idx < 1 || idx > PAID_MODELS.length) {
+    logger.error('Invalid choice.');
+    return;
+  }
+  const selected = PAID_MODELS[idx - 1];
+  openRouterModel = selected.id;
+  logger.success(`Active OpenRouter model set to: ${chalk.bold(openRouterModel)}`);
+}
+
+async function handleFreeloadersCommand() {
+  printFreeModels();
+  const choice = await askUser('  Select model [1-N] : ');
+  const trimmed = choice.trim();
+  if (trimmed === '/back' || trimmed === '') {
+    logger.info('Model selection cancelled.');
+    return;
+  }
+  const idx = parseInt(trimmed, 10);
+  if (isNaN(idx) || idx < 1 || idx > FREE_MODELS.length) {
+    logger.error('Invalid choice.');
+    return;
+  }
+  const selected = FREE_MODELS[idx - 1];
+  openRouterModel = selected.id;
+  logger.success(`Active OpenRouter model set to: ${chalk.bold(openRouterModel)}`);
+}
+
+async function queryOpenRouter(messages: { role: string, content: string }[], commandName: string, queryDesc: string, signal?: AbortSignal): Promise<string> {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    throw new Error('OPENROUTER_API_KEY is not set in your .env file.');
+  }
+
+  const startTime = Date.now();
+  const res = await axios.post(
+    'https://openrouter.ai/api/v1/chat/completions',
+    {
+      model: openRouterModel,
+      messages: messages
+    },
+    {
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'HTTP-Referer': 'https://github.com/v54087912-collab/Jules-CLI',
+        'X-Title': 'Jules CLI',
+        'Content-Type': 'application/json'
+      },
+      signal: signal
+    }
+  );
+
+  const endTime = Date.now();
+  const latency = (endTime - startTime) / 1000;
+  lastResponseLatency = parseFloat(latency.toFixed(1));
+
+  const choice = res.data?.choices?.[0];
+  const reply = choice?.message?.content || '';
+
+  const usage = res.data?.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  const promptTokens = usage.prompt_tokens || 0;
+  const completionTokens = usage.completion_tokens || 0;
+  const totalTokens = usage.total_tokens || 0;
+
+  lastResponseSpeed = latency > 0 ? Math.round(completionTokens / latency) : 0;
+
+  // Find price
+  let inputPrice = 0;
+  let outputPrice = 0;
+  const matchModel = [...PAID_MODELS, ...FREE_MODELS].find(m => m.id === openRouterModel);
+  if (matchModel) {
+    inputPrice = matchModel.inputPrice;
+    outputPrice = matchModel.outputPrice;
+  }
+
+  const cost = (promptTokens * inputPrice / 1000000) + (completionTokens * outputPrice / 1000000);
+
+  // Update stats
+  const stats = loadOpenRouterStats();
+  stats.requestsToday += 1;
+  stats.tokensToday += totalTokens;
+  saveOpenRouterStats(stats);
+
+  // Add session activity
+  openModeSessionActivities.push({
+    command: commandName,
+    query: queryDesc,
+    tokens: totalTokens,
+    cost: cost
+  });
+
+  return reply;
+}
+
+function printActivityPanelLine(content: string, colorFn: any = chalk.white) {
+  const cleanLen = content.replace(/\x1b\[[0-9;]*m/g, '').length;
+  const padding = 42 - cleanLen;
+  if (padding > 0) {
+    console.log(chalk.bold.blue('║') + colorFn(content) + ' '.repeat(padding) + chalk.bold.blue('║'));
+  } else {
+    console.log(chalk.bold.blue('║') + colorFn(content.substring(0, 42)) + chalk.bold.blue('║'));
+  }
+}
+
+function drawOpenModeActivityPanel() {
+  const stats = loadOpenRouterStats();
+  
+  // Calculate reset time (next 06:00 AM IST)
+  const now = new Date();
+  const istNow = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+  const istReset = new Date(istNow);
+  istReset.setUTCHours(6, 0, 0, 0);
+  if (istNow.getTime() >= istReset.getTime()) {
+    istReset.setUTCDate(istReset.getUTCDate() + 1);
+  }
+  const diffMs = istReset.getTime() - istNow.getTime();
+  const hoursLeft = Math.floor(diffMs / (3600 * 1000));
+  const minutesLeft = Math.floor((diffMs % (3600 * 1000)) / (60 * 1000));
+  const resetStr = `06:00 AM IST (${hoursLeft}h ${minutesLeft}m left)`;
+
+  const blue = chalk.bold.blue;
+  const green = chalk.green;
+  
+  console.log(blue('╔══════════════════════════════════════════╗'));
+  printActivityPanelLine('     OPEN MODE — Live Activity            ', chalk.bold.cyan);
+  console.log(blue('╠══════════════════════════════════════════╣'));
+  printActivityPanelLine(` Model    : ${openRouterModel}`);
+  printActivityPanelLine(` Status   : ● Connected                  `, (s: string) => s.replace('● Connected', green('● Connected')));
+  console.log(blue('╠══════════════════════════════════════════╣'));
+  printActivityPanelLine(' QUOTA                                    ', chalk.bold.yellow);
+  printActivityPanelLine(`  Requests  : ${stats.requestsToday} / 200 today`);
+  printActivityPanelLine(`  Tokens    : ${stats.tokensToday.toLocaleString()} / 50,000`);
+  printActivityPanelLine(`  Reset     : ${resetStr}`);
+  console.log(blue('╠══════════════════════════════════════════╣'));
+  printActivityPanelLine(' SESSION ACTIVITY                         ', chalk.bold.yellow);
+  if (openModeSessionActivities.length === 0) {
+    printActivityPanelLine('  (No activity yet in this session)       ', chalk.dim);
+  } else {
+    // Show last 5 activities
+    const lastActs = openModeSessionActivities.slice(-5);
+    for (const act of lastActs) {
+      const actStr = `  ✓ ${act.command} ${act.query}`;
+      const rightStr = `→ ${act.tokens} tok  $${act.cost.toFixed(2)}`;
+      
+      const cleanActStr = actStr.replace(/\x1b\[[0-9;]*m/g, '');
+      const cleanRightStr = rightStr.replace(/\x1b\[[0-9;]*m/g, '');
+      
+      const availSpace = 42 - cleanRightStr.length - 2;
+      let leftTrunc = cleanActStr;
+      if (leftTrunc.length > availSpace) {
+        leftTrunc = leftTrunc.substring(0, availSpace - 3) + '...';
+      }
+      
+      const paddingVal = 42 - leftTrunc.length - cleanRightStr.length;
+      const padding = paddingVal > 0 ? ' '.repeat(paddingVal) : ' ';
+      
+      const styledLeft = leftTrunc.replace('✓', chalk.green('✓'));
+      const styledRight = chalk.dim(rightStr);
+      
+      console.log(blue('║') + styledLeft + padding + styledRight + blue('║'));
+    }
+  }
+  console.log(blue('╠══════════════════════════════════════════╣'));
+  printActivityPanelLine(' LAST RESPONSE                            ', chalk.bold.yellow);
+  printActivityPanelLine(`  Latency : ${lastResponseLatency}s`);
+  printActivityPanelLine(`  Speed   : ${lastResponseSpeed} tok/sec`);
+  console.log(blue('╚══════════════════════════════════════════╝'));
+}
+
+interface ScannedFile {
+  relPath: string;
+  absPath: string;
+  lineCount: number;
+  content: string;
+}
+
+function getRelativePath(absolutePath: string, rootDir: string): string {
+  return path.relative(rootDir, absolutePath);
+}
+
+function scanDirectory(dir: string, rootDir: string, fileList: ScannedFile[]) {
+  if (fileList.length >= 100) return;
+  const items = fs.readdirSync(dir, { withFileTypes: true });
+  for (const item of items) {
+    const fullPath = path.join(dir, item.name);
+    const rel = getRelativePath(fullPath, rootDir);
+
+    if (item.isDirectory()) {
+      if (['node_modules', '.git', 'dist', 'build', 'bin', 'obj', 'out', '.bak'].includes(item.name)) {
+        continue;
+      }
+      scanDirectory(fullPath, rootDir, fileList);
+    } else if (item.isFile()) {
+      const ext = path.extname(item.name).toLowerCase();
+      if (['.png', '.jpg', '.jpeg', '.gif', '.ico', '.pdf', '.zip', '.tar', '.gz', '.mp4', '.mp3', '.exe', '.dll', '.so', '.dylib', '.woff', '.woff2', '.eot', '.ttf', '.map', '.db', '.sqlite'].includes(ext)) {
+        continue;
+      }
+      try {
+        const stats = fs.statSync(fullPath);
+        if (stats.size > 100 * 1024) continue;
+
+        const content = fs.readFileSync(fullPath, 'utf8');
+        const lines = content.split('\n');
+        fileList.push({
+          relPath: rel,
+          absPath: fullPath,
+          lineCount: lines.length,
+          content: content
+        });
+      } catch (e) {}
+    }
+  }
+}
+
+function buildContextTreeString(rootDir: string, files: ScannedFile[]): string {
+  const treeLines: string[] = [];
+  const projectName = path.basename(rootDir) || 'Project';
+  treeLines.push(`📁 ${projectName}/`);
+
+  const sortedFiles = [...files].sort((a, b) => a.relPath.localeCompare(b.relPath));
+  
+  for (let i = 0; i < sortedFiles.length; i++) {
+    const f = sortedFiles[i];
+    const isLast = i === sortedFiles.length - 1;
+    const prefix = isLast ? '  └─ ' : '  ├─ ';
+    
+    let desc = `${f.lineCount} lines`;
+    if (f.relPath === 'package.json') {
+      try {
+        const pkg = JSON.parse(f.content);
+        const deps = Object.keys(pkg.dependencies || {}).slice(0, 3).join(', ');
+        if (deps) {
+          desc = `deps: ${deps}...`;
+        }
+      } catch (e) {}
+    } else {
+      const commentMatch = f.content.match(/(?:\/\/|#|\/\*)\s*(.*)/);
+      if (commentMatch && commentMatch[1]) {
+        const cleanComment = commentMatch[1].trim().substring(0, 20);
+        if (cleanComment) {
+          desc = `${cleanComment}, ${f.lineCount} lines`;
+        }
+      }
+    }
+    
+    treeLines.push(`${prefix}${f.relPath.padEnd(22)} [${desc}]`);
+  }
+  return treeLines.join('\n');
+}
+
+function getProjectFilesContext(rootDir: string, instruction: string): { contextText: string, fileTree: string } {
+  const files: ScannedFile[] = [];
+  try {
+    scanDirectory(rootDir, rootDir, files);
+  } catch (e) {}
+
+  const tree = buildContextTreeString(rootDir, files);
+
+  let contextText = `Project Structure:\n${tree}\n\n`;
+  
+  let includedCount = 0;
+  for (const f of files) {
+    let shouldInclude = false;
+    const filename = path.basename(f.relPath);
+    
+    if (instruction.toLowerCase().includes(filename.toLowerCase())) {
+      shouldInclude = true;
+    }
+    if (files.length <= 15) {
+      shouldInclude = true;
+    }
+
+    if (shouldInclude && includedCount < 20) {
+      contextText += `--- FILE CONTENT: ${f.relPath} ---\n${f.content}\n\n`;
+      includedCount++;
+    }
+  }
+  return { contextText, fileTree: tree };
+}
+
+function cleanBlockContent(content: string): string {
+  let cleaned = content;
+  if (cleaned.startsWith('\r\n')) {
+    cleaned = cleaned.substring(2);
+  } else if (cleaned.startsWith('\n')) {
+    cleaned = cleaned.substring(1);
+  }
+  if (cleaned.endsWith('\r\n')) {
+    cleaned = cleaned.slice(0, -2);
+  } else if (cleaned.endsWith('\n')) {
+    cleaned = cleaned.slice(0, -1);
+  }
+  return cleaned;
+}
+
+interface FileEdit {
+  filePath: string;
+  searchContent: string;
+  replaceContent: string;
+}
+
+function parseSearchReplaceBlocks(text: string): FileEdit[] {
+  const edits: FileEdit[] = [];
+  const regex = /FILE:\s*([^\r\n]+)[\r\n]+<<<<<<< SEARCH([\s\S]*?)=======([\s\S]*?)>>>>>>>/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    edits.push({
+      filePath: match[1].trim(),
+      searchContent: match[2],
+      replaceContent: match[3]
+    });
+  }
+  return edits;
+}
+
+function applyOpenRouterEdits(edits: FileEdit[]): { file: string, success: boolean, error?: string }[] {
+  const results: { file: string, success: boolean, error?: string }[] = [];
+  for (const edit of edits) {
+    const absPath = path.resolve(process.cwd(), edit.filePath);
+    try {
+      const dir = path.dirname(absPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+
+      const searchClean = cleanBlockContent(edit.searchContent);
+      const replaceClean = cleanBlockContent(edit.replaceContent);
+
+      if (!fs.existsSync(absPath)) {
+        if (searchClean !== '') {
+          results.push({ file: edit.filePath, success: false, error: 'File does not exist, but search block is not empty.' });
+          continue;
+        }
+        fs.writeFileSync(absPath, replaceClean, 'utf8');
+        results.push({ file: edit.filePath, success: true });
+      } else {
+        const originalContent = fs.readFileSync(absPath, 'utf8');
+        if (searchClean === '') {
+          fs.writeFileSync(absPath, replaceClean, 'utf8');
+          results.push({ file: edit.filePath, success: true });
+        } else {
+          if (!originalContent.includes(searchClean)) {
+            results.push({
+              file: edit.filePath,
+              success: false,
+              error: `Search block code not found in file. Please ensure exact matches.`
+            });
+            continue;
+          }
+          const updatedContent = originalContent.replace(searchClean, replaceClean);
+          fs.writeFileSync(absPath, updatedContent, 'utf8');
+          results.push({ file: edit.filePath, success: true });
+        }
+      }
+    } catch (e: any) {
+      results.push({ file: edit.filePath, success: false, error: e.message });
+    }
+  }
+  return results;
+}
+
+async function handleChatMode() {
+  const defaultPath = process.cwd();
+  console.log(chalk.cyan(`\n/chatmode → Project Analysis`));
+  const projectPathInput = await askUser(`  Enter project path (default: ${defaultPath}): `);
+  const projectPath = projectPathInput.trim() || defaultPath;
+  
+  if (!fs.existsSync(projectPath) || !fs.statSync(projectPath).isDirectory()) {
+    logger.error('Invalid directory path.');
+    return;
+  }
+
+  const spinner = ora({
+    text: chalk.dim('Scanning project files…'),
+    spinner: 'dots',
+    color: 'white'
+  }).start();
+
+  const files: ScannedFile[] = [];
+  try {
+    scanDirectory(projectPath, projectPath, files);
+  } catch (e: any) {
+    spinner.stop();
+    logger.error(`Scan failed: ${e.message}`);
+    return;
+  }
+  
+  spinner.stop();
+  if (files.length === 0) {
+    logger.error('No readable code files found.');
+    return;
+  }
+
+  const contextTree = buildContextTreeString(projectPath, files);
+  console.log(chalk.bold.yellow('\n📁 Context Tree Scanned:'));
+  console.log(chalk.dim(contextTree));
+  console.log('');
+
+  let codebaseContext = `You are a project analyzer. Here is the codebase context:\n\n`;
+  for (const f of files) {
+    codebaseContext += `--- FILE: ${f.relPath} ---\n${f.content}\n\n`;
+  }
+
+  const systemPrompt = `You are an expert software architect analyzing a codebase.
+Use the scanned codebase context to analyze the project and provide:
+1. Architecture Overview (explain the flow and layout of files)
+2. Code Quality Insights (strengths, styling, documentation)
+3. Bug Patterns Detected (risks, race conditions, edge cases)
+4. Improvement Suggestions (refactoring, optimization)
+
+IMPORTANT:
+- Keep your analysis focused, technical, and highly constructive.
+- Be concise but specific (refer to actual file names and line counts).
+- Under NO circumstances suggest or print file edits that require applying. This is a read-only chat mode.
+`;
+
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: codebaseContext + `\n\nPlease analyze this codebase.` }
+  ];
+
+  const analysisSpinner = ora({
+    text: chalk.dim('Analyzing project context with OpenRouter…'),
+    spinner: 'dots',
+    color: 'white'
+  }).start();
+
+  try {
+    const analysis = await queryOpenRouter(messages, '/chatmode', 'analysis', shellState.abortController.signal);
+    analysisSpinner.stop();
+    console.log(chalk.bold.green('\n=== AI Codebase Analysis ==='));
+    console.log(analysis);
+    console.log(chalk.bold.green('============================\n'));
+    
+    messages.push({ role: 'assistant', content: analysis });
+
+    while (true) {
+      const q = await askUser(chalk.bold.cyan('chatmode » Ask a question (or type /exit): '));
+      const trimmedQ = q.trim();
+      if (trimmedQ === '/exit' || trimmedQ === '') {
+        console.log(chalk.yellow('Exiting chatmode.'));
+        break;
+      }
+      
+      messages.push({ role: 'user', content: trimmedQ });
+      
+      const qSpinner = ora({
+        text: chalk.dim('Generating response…'),
+        spinner: 'dots',
+        color: 'white'
+      }).start();
+
+      try {
+        const ans = await queryOpenRouter(messages, '/chatmode', 'query', shellState.abortController.signal);
+        qSpinner.stop();
+        console.log(chalk.bold.green('\nAI:'));
+        console.log(ans);
+        console.log('');
+        messages.push({ role: 'assistant', content: ans });
+      } catch (err: any) {
+        qSpinner.stop();
+        logger.error(`Request failed: ${err.message}`);
+      }
+    }
+  } catch (err: any) {
+    analysisSpinner.stop();
+    logger.error(`Analysis failed: ${err.message}`);
+  }
+}
+
+async function handleOpenRouterEdit(instruction: string) {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    logger.error('OPENROUTER_API_KEY is not set. Please set it in your .env file.');
+    return;
+  }
+
+  const spinner = ora({
+    text: chalk.dim('Scanning project context…'),
+    spinner: 'dots',
+    color: 'white'
+  }).start();
+
+  const rootDir = process.cwd();
+  const { contextText, fileTree } = getProjectFilesContext(rootDir, instruction);
+  spinner.stop();
+
+  const messages = [
+    { role: 'system', content: EDIT_SYSTEM_PROMPT },
+    { role: 'user', content: `${contextText}\nUser Instruction: ${instruction}` }
+  ];
+
+  const editSpinner = ora({
+    text: chalk.dim('Generating plan from OpenRouter…'),
+    spinner: 'dots',
+    color: 'white'
+  }).start();
+
+  try {
+    const cmdName = currentMode === 'plan' ? '/plan' : '/fast';
+    const responseText = await queryOpenRouter(messages, cmdName, instruction.substring(0, 20), shellState.abortController.signal);
+    editSpinner.stop();
+
+    const edits = parseSearchReplaceBlocks(responseText);
+    
+    if (edits.length === 0) {
+      console.log(chalk.bold.yellow('\n=== OpenRouter Response ==='));
+      console.log(responseText);
+      console.log(chalk.bold.yellow('==========================='));
+      logger.info('No file changes were requested in this response.');
+      return;
+    }
+
+    console.log(chalk.bold.yellow('\nProposed Edits:'));
+    for (const edit of edits) {
+      console.log(`  ${chalk.cyan(edit.filePath)}:`);
+      const searchClean = cleanBlockContent(edit.searchContent);
+      const replaceClean = cleanBlockContent(edit.replaceContent);
+      if (searchClean === '') {
+        console.log(chalk.green(`    + Create/Overwrite file`));
+      } else {
+        console.log(chalk.red(`    - Search block: ${searchClean.split('\n').length} lines`));
+        console.log(chalk.green(`    + Replace block: ${replaceClean.split('\n').length} lines`));
+      }
+    }
+    console.log('');
+
+    let shouldApply = true;
+    if (currentMode === 'plan') {
+      const ans = await askUser('Do you want to apply these changes? (y/n): ');
+      if (ans.trim().toLowerCase() !== 'y') {
+        shouldApply = false;
+        logger.info('Edits discarded.');
+      }
+    }
+
+    if (shouldApply) {
+      const applyResults = applyOpenRouterEdits(edits);
+      let successCount = 0;
+      for (const res of applyResults) {
+        if (res.success) {
+          logger.success(`Applied changes to: ${chalk.bold(res.file)}`);
+          successCount++;
+        } else {
+          logger.error(`Failed to modify ${chalk.bold(res.file)}: ${res.error}`);
+        }
+      }
+      if (successCount === edits.length) {
+        logger.success('All edits applied successfully.');
+      }
+    }
+  } catch (err: any) {
+    editSpinner.stop();
+    logger.error(`Edit failed: ${err.message}`);
+  }
+}
+
 async function handleUsageCommand() {
   const spinner = ora({ text: chalk.dim('Fetching session data…'), spinner: 'dots', color: 'white' }).start();
 
@@ -3885,13 +4613,13 @@ async function startShell() {
     logger.success(`Automatically switched to new project: ${projectName}`);
   }
 
-  await printBanner(projectName, branch, currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
+  await printBanner(projectName, branch, isOpenMode ? 'OPEN MODE (' + openRouterModel + ')' : currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
 
   console.log(chalk.bold.white('  Tips for getting started:'));
   console.log(chalk.white('  1. Run ') + chalk.bold.cyan('/init') + chalk.white(' to link this directory to a shadow repository'));
   console.log(chalk.white('  2. Type your coding instruction and press ') + chalk.bold('Enter') + chalk.white(' to edit files\n'));
 
-  const commandsList = ['/init', '/newrepo', '/repo', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/diff', '/revert', '/help', '/docs', '/shot', '/deleteworkspace', '/exit'];
+  const commandsList = ['/init', '/newrepo', '/repo', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/diff', '/revert', '/help', '/docs', '/shot', '/deleteworkspace', '/exit', '/open', '/exitmode', '/model', '/freeloaders', '/chatmode'];
 
   const PROMPT_STR = '> ';
   const PROMPT_LEN = PROMPT_STR.length;
@@ -3993,7 +4721,7 @@ async function startShell() {
         lines.push(formattedText);
       } else {
         const projectName = path.basename(process.cwd());
-        const mode = currentMode.toUpperCase();
+        const mode = isOpenMode ? 'OPEN' : currentMode.toUpperCase();
         const shortHeader = `⚙️  ${projectName} [${mode}]`;
         lines.push(chalk.cyan('  ' + (shortHeader.length > cols - 4 ? shortHeader.substring(0, cols - 7) + '...' : shortHeader)));
       }
@@ -4001,7 +4729,7 @@ async function startShell() {
       lines.push(chalk.dim('─'.repeat(Math.max(0, cols - 2))));
 
       const projectName = path.basename(process.cwd());
-      const mode = currentMode.toUpperCase();
+      const mode = isOpenMode ? `OPEN MODE (${openRouterModel})` : currentMode.toUpperCase();
       
       const headerContent = `⚙️  JULES-CLI | 📁 ${projectName} [🌿 ${cachedBranch}] | ⚡ MODE: ${mode}`;
       let truncatedHeader = headerContent;
@@ -4050,10 +4778,14 @@ async function startShell() {
         lines.push(formattedText);
       }
 
-      const tipsContent = `💡 Tips: \`/init\` to link repo  •  \`/help\` for commands  •  \`/exit\` to quit`;
+      const tipsContent = isOpenMode
+        ? `💡 Tips: \`/exitmode\` to leave Open Mode  •  \`/model\` to pick model  •  \`/session\` for live panel`
+        : `💡 Tips: \`/init\` to link repo  •  \`/help\` for commands  •  \`/exit\` to quit`;
       let truncatedTips = tipsContent;
       if (truncatedTips.length > cols - 2) {
-        truncatedTips = `💡 Tips: /init • /help • /exit`;
+        truncatedTips = isOpenMode
+          ? `💡 Tips: /exitmode • /model • /session`
+          : `💡 Tips: /init • /help • /exit`;
         if (truncatedTips.length > cols - 2) {
           truncatedTips = truncatedTips.substring(0, cols - 5) + '...';
         }
@@ -4738,7 +5470,7 @@ async function startShell() {
       shellState.trackedSessionId = null;
       shellState.trackedSessionUrl = null;
       logger.success(`Automatically switched to new project: ${projectName}`);
-      await printBanner(projectName, branch, currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
+      await printBanner(projectName, branch, isOpenMode ? 'OPEN MODE (' + openRouterModel + ')' : currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
     }
 
     const input = substitutedLine.trim();
@@ -4792,7 +5524,11 @@ async function startShell() {
         // Direct chat mode: treat the whole line as an instruction
         try {
           if (!(rl as any).closed) rl.pause();
-          await handleEdit(finalInput);
+          if (isOpenMode) {
+            await handleOpenRouterEdit(finalInput);
+          } else {
+            await handleEdit(finalInput);
+          }
         } finally {
           if (!(rl as any).closed) rl.resume();
           if (shellState.keypressHandler) {
@@ -4929,7 +5665,7 @@ async function startShell() {
               const branch = await getCurrentBranch();
               const newStatus = getWorkspaceStatus();
               projectName = newStatus.projectName || selectedProject;
-              await printBanner(projectName, branch || 'main', currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
+              await printBanner(projectName, branch || 'main', isOpenMode ? 'OPEN MODE (' + openRouterModel + ')' : currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl);
             } else {
               logger.error('Invalid selection.');
             }
@@ -4975,7 +5711,11 @@ async function startShell() {
           } else {
             try {
               if (!(rl as any).closed) rl.pause();
-              await handleEdit(args.join(' '));
+              if (isOpenMode) {
+                await handleOpenRouterEdit(args.join(' '));
+              } else {
+                await handleEdit(args.join(' '));
+              }
             } finally {
               if (!(rl as any).closed) rl.resume();
             }
@@ -4990,20 +5730,119 @@ async function startShell() {
           }
           break;
         case '/session':
-          try {
-            if (!(rl as any).closed) rl.pause();
-            await handleSessionCommand(args);
-          } finally {
-            if (!(rl as any).closed) rl.resume();
+          if (isOpenMode) {
+            drawOpenModeActivityPanel();
+          } else {
+            try {
+              if (!(rl as any).closed) rl.pause();
+              await handleSessionCommand(args);
+            } finally {
+              if (!(rl as any).closed) rl.resume();
+            }
           }
           break;
         case '/plan':
-          currentMode = 'plan';
-          logger.success('Switched to PLAN mode (Manual plan approval required).');
+          if (isOpenMode) {
+            if (args.length > 0) {
+              const oldMode = currentMode;
+              currentMode = 'plan';
+              try {
+                if (!(rl as any).closed) rl.pause();
+                await handleOpenRouterEdit(args.join(' '));
+              } finally {
+                if (!(rl as any).closed) rl.resume();
+                currentMode = oldMode;
+              }
+            } else {
+              currentMode = 'plan';
+              logger.success('Switched to PLAN mode via OpenRouter (Confirmation required).');
+            }
+          } else {
+            currentMode = 'plan';
+            logger.success('Switched to PLAN mode (Manual plan approval required).');
+          }
           break;
         case '/fast':
-          currentMode = 'fast';
-          logger.success('Switched to FAST mode (Automatic plan approval enabled).');
+          if (isOpenMode) {
+            if (args.length > 0) {
+              const oldMode = currentMode;
+              currentMode = 'fast';
+              try {
+                if (!(rl as any).closed) rl.pause();
+                await handleOpenRouterEdit(args.join(' '));
+              } finally {
+                if (!(rl as any).closed) rl.resume();
+                currentMode = oldMode;
+              }
+            } else {
+              currentMode = 'fast';
+              logger.success('Switched to FAST mode via OpenRouter (Auto-apply enabled).');
+            }
+          } else {
+            currentMode = 'fast';
+            logger.success('Switched to FAST mode (Automatic plan approval enabled).');
+          }
+          break;
+        case '/open':
+          dotenv.config();
+          const apiKey = process.env.OPENROUTER_API_KEY;
+          if (!apiKey) {
+            console.log(chalk.bold.red('\n  .env Setup Guide (Missing OPENROUTER_API_KEY):'));
+            console.log(chalk.dim('  Please set the following environment variables in your .env file:'));
+            console.log(chalk.yellow('  OPENROUTER_API_KEY=sk-or-v1-xxxxxxx'));
+            console.log(chalk.yellow('  OPENROUTER_DEFAULT_MODEL=deepseek/deepseek-coder\n'));
+            logger.error('Could not activate Open Mode. OPENROUTER_API_KEY is not set.');
+          } else {
+            isOpenMode = true;
+            openRouterModel = process.env.OPENROUTER_DEFAULT_MODEL || 'deepseek/deepseek-coder:free';
+            logger.success('OPEN MODE ACTIVE ✓');
+            logger.info('All commands now route → OpenRouter');
+            logger.info(`Active Model: ${chalk.bold(openRouterModel)}`);
+          }
+          break;
+        case '/exitmode':
+          if (!isOpenMode) {
+            logger.info('Already in Jules AI mode.');
+          } else {
+            isOpenMode = false;
+            logger.success('Switched back to Jules AI mode.');
+          }
+          break;
+        case '/model':
+          if (!isOpenMode) {
+            logger.error('This command is only available in Open Mode (/open).');
+          } else {
+            try {
+              if (!(rl as any).closed) rl.pause();
+              await handleModelCommand();
+            } finally {
+              if (!(rl as any).closed) rl.resume();
+            }
+          }
+          break;
+        case '/freeloaders':
+          if (!isOpenMode) {
+            logger.error('This command is only available in Open Mode (/open).');
+          } else {
+            try {
+              if (!(rl as any).closed) rl.pause();
+              await handleFreeloadersCommand();
+            } finally {
+              if (!(rl as any).closed) rl.resume();
+            }
+          }
+          break;
+        case '/chatmode':
+          if (!isOpenMode) {
+            logger.error('This command is only available in Open Mode (/open).');
+          } else {
+            try {
+              if (!(rl as any).closed) rl.pause();
+              await handleChatMode();
+            } finally {
+              if (!(rl as any).closed) rl.resume();
+            }
+          }
           break;
         case '/docs':
           await handleDocs();
@@ -5103,7 +5942,7 @@ async function startShell() {
           console.clear();
           branch = await getCurrentBranch() || 'main';
           shadowUrl = await getRemoteUrl();
-          await printBanner(projectName, branch, currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl, false, true);
+          await printBanner(projectName, branch, isOpenMode ? 'OPEN MODE (' + openRouterModel + ')' : currentMode, shadowUrl, shellState.trackedSessionId, shellState.trackedSessionUrl, false, true);
           break;
         case '/diff':
           try {
