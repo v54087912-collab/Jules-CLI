@@ -3186,6 +3186,15 @@ const PAID_MODELS = [
     isFree: false
   },
   {
+    name: 'google/gemini-3.1-pro-preview',
+    id: 'google/gemini-3.1-pro-preview-20260219',
+    context: '1M tokens',
+    inputPrice: 2.00,
+    outputPrice: 12.00,
+    speed: '~40 tok/sec',
+    isFree: false
+  },
+  {
     name: 'google/gemini-2.5-pro',
     id: 'google/gemini-2.5-pro',
     context: '2M tokens',
@@ -3216,14 +3225,14 @@ const PAID_MODELS = [
 
 const FREE_MODELS = [
   {
-    name: 'qwen/qwen3-coder:free',
-    id: 'qwen/qwen3-coder:free',
-    context: '32k tokens',
+    name: 'meta-llama/llama-3.2-3b-instruct:free',
+    id: 'meta-llama/llama-3.2-3b-instruct:free',
+    context: '128k tokens',
     inputPrice: 0.00,
     outputPrice: 0.00,
-    speed: '~70 tok/sec',
+    speed: '~120 tok/sec',
     isFree: true,
-    bestFor: 'Coding, debugging',
+    bestFor: 'Lightweight instruction, speed',
     limits: '20 req/min'
   },
   {
@@ -5883,7 +5892,7 @@ async function startShell() {
             logger.error('Could not activate Open Mode. OPENROUTER_API_KEY is not set.');
           } else {
             isOpenMode = true;
-            openRouterModel = process.env.OPENROUTER_DEFAULT_MODEL || 'qwen/qwen3-coder:free';
+            openRouterModel = process.env.OPENROUTER_DEFAULT_MODEL || 'meta-llama/llama-3.3-70b-instruct:free';
             logger.success('OPEN MODE ACTIVE ✓');
             logger.info('All commands now route → OpenRouter');
             logger.info(`Active Model: ${chalk.bold(openRouterModel)}`);
@@ -5992,44 +6001,37 @@ async function startShell() {
         case '/help':
           console.log('');
           console.log(chalk.bold.white('  Commands:'));
-          const cmd = (c: string, desc: string) => {
-            console.log(`    ${chalk.bold.cyan(c.padEnd(28))} ${chalk.dim(desc)}`);
-          };
-
-          cmd('/init',                   'Initialize git & link shadow repo');
-          cmd('/newrepo',                'Create new empty private GitHub repo');
-          cmd('/repo',                   'Create GitHub repo or switch projects');
-          cmd('/sync',                   'Push local changes to GitHub');
-          cmd('/edit [prompt]',          'Ask Jules AI to edit your code');
-          cmd('/restore',                'Restore files from .bak backups');
-          cmd('/session [ls|rm|track]',  'List, delete or track sessions');
-          cmd('/usage',                  "Today's stats & all-time summary");
-          cmd('/plan',                   'Switch to manual plan mode');
-          cmd('/fast',                   'Switch to auto plan mode (default)');
-          cmd('/docs',                   'Full documentation');
-          cmd('/shot',                   'Show keyboard shortcuts manual');
-          cmd('/deleteworkspace',        'Delete workspace and restart');
-          cmd('/clear',                  'Clear terminal');
-          cmd('/diff [args]',            'Show git diff of changes');
-          cmd('/revert [args]',          'Undo last Jules action/commit');
-          cmd('/open',                   'Activate Open Mode (routes requests to OpenRouter)');
-          cmd('/exitmode',               'Exit Open Mode and switch back to Jules AI');
-          cmd('/model',                  'Select/change active model in Open Mode');
-          cmd('/freemodels',             'Select a free model in Open Mode');
-          cmd('/chatmode',               'Scan project files and chat (Open Mode)');
-          cmd('/help',                   'Show this menu');
-          cmd('/exit',                   'Quit');
+          const cmdData = [
+            ['/init', 'Init git & link shadow'],           ['/clear', 'Clear terminal'],
+            ['/newrepo', 'Create GitHub repo'],            ['/diff [args]', 'Git diff'],
+            ['/repo', 'Switch/Create projects'],           ['/revert [args]', 'Undo action'],
+            ['/sync', 'Push to GitHub'],                   ['/open', 'Activate Open Mode'],
+            ['/edit [prompt]', 'AI code edit'],            ['/exitmode', 'Exit Open Mode'],
+            ['/restore', 'Restore backups'],               ['/model', 'Change active model'],
+            ['/session', 'Manage sessions'],               ['/freemodels', 'Free Open Models'],
+            ['/usage', 'Token usage stats'],               ['/chatmode', 'Project file chat'],
+            ['/plan', 'Manual plan mode'],                 ['/help', 'Show this menu'],
+            ['/fast', 'Auto plan mode (default)'],         ['/exit', 'Quit'],
+            ['/docs', 'Documentation'],                    ['', ''],
+            ['/shot', 'Keyboard shortcuts'],               ['', ''],
+            ['/deleteworkspace', 'Delete workspace'],      ['', '']
+          ];
+          for (let i = 0; i < cmdData.length; i += 2) {
+            const left = cmdData[i];
+            const right = cmdData[i+1];
+            if (!left) break;
+            const leftStr = `    ${chalk.bold.cyan(left[0].padEnd(18))} ${chalk.dim(left[1].padEnd(25))}`;
+            const rightStr = right && right[0] ? `${chalk.bold.cyan(right[0].padEnd(16))} ${chalk.dim(right[1])}` : '';
+            console.log(leftStr + rightStr);
+          }
           console.log('');
           console.log(chalk.dim('  Or just type your instruction and press Enter'));
           console.log('');
-          console.log(chalk.bold.white('  Project Information:'));
-          console.log(`    ${chalk.bold.cyan('Open Source'.padEnd(28))} ${chalk.dim('Jules CLI is an Open Source project')}`);
-          console.log(`    ${chalk.bold.cyan('GitHub'.padEnd(28))} ${chalk.dim('https://github.com/v54087912-collab/Jules-CLI.git')}`);
-          console.log('');
-          console.log(chalk.bold.white('  Support & Links:'));
-          console.log(`    ${chalk.bold.cyan('Developer'.padEnd(28))} ${chalk.dim('https://t.me/R3V_X')}`);
-          console.log(`    ${chalk.bold.cyan('Community'.padEnd(28))} ${chalk.dim('https://t.me/allinformation0173')}`);
-          console.log(`    ${chalk.bold.cyan('Instagram'.padEnd(28))} ${chalk.dim('https://www.instagram.com/opeditzxx/')}`);
+          console.log(chalk.bold.white('  Project Information & Links:'));
+          console.log(`    ${chalk.bold.cyan('GitHub'.padEnd(14))} ${chalk.dim('https://github.com/v54087912-collab/Jules-CLI.git')}`);
+          console.log(`    ${chalk.bold.cyan('Developer'.padEnd(14))} ${chalk.dim('https://t.me/R3V_X')}`);
+          console.log(`    ${chalk.bold.cyan('Community'.padEnd(14))} ${chalk.dim('https://t.me/allinformation0173')}`);
+          console.log(`    ${chalk.bold.cyan('Instagram'.padEnd(14))} ${chalk.dim('https://www.instagram.com/opeditzxx/')}`);
           console.log('');
           break;
         case '/clear':
