@@ -173,7 +173,7 @@ export async function printBanner(
       const subtitle = chalk.dim('  —  research preview Developer: Rev');
       const badgeLineLength = 14 + subtitle.replace(/\x1b\[[0-9;]*m/g, '').length;
       console.log('\n' + center(badge + subtitle, badgeLineLength));
-      console.log(center(chalk.dim('Version: 2.0'), 12));
+      console.log(center(chalk.dim('Version: 2.5'), 12));
 
       // 4. Info Section
       const divider = chalk.dim('  ' + '─'.repeat(Math.min(cols - 4, 50)));

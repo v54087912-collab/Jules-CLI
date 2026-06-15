@@ -1549,7 +1549,7 @@ async function promptJulesReply(cleanHeader: string, sessionId?: string): Promis
       const line = rl!.line;
       let newMatches: string[] = [];
       if (line.startsWith('/')) {
-        newMatches = ['/init', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/diff', '/revert', '/help', '/docs', '/shot', '/exit'].filter(c => c.startsWith(line));
+        newMatches = ['/init', '/newrepo', '/repo', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/diff', '/revert', '/help', '/docs', '/shot', '/deleteworkspace', '/exit', '/open', '/exitmode', '/model', '/freemodels', '/chatmode'].filter(c => c.startsWith(line));
         if (newMatches.length > 0 && line === newMatches[0]) {
           newMatches = [];
         }
@@ -3150,7 +3150,7 @@ let lastResponseSpeed = 0;
 
 const PAID_MODELS = [
   {
-    name: 'anthropic/claude-sonnet-4-6',
+    name: 'anthropic/claude-3.5-sonnet',
     id: 'anthropic/claude-3.5-sonnet',
     context: '200k tokens',
     inputPrice: 3.00,
@@ -3162,9 +3162,54 @@ const PAID_MODELS = [
     name: 'openai/gpt-4o',
     id: 'openai/gpt-4o',
     context: '128k tokens',
-    inputPrice: 5.00,
-    outputPrice: 15.00,
+    inputPrice: 2.50,
+    outputPrice: 10.00,
     speed: '~110 tok/sec',
+    isFree: false
+  },
+  {
+    name: 'deepseek/deepseek-chat',
+    id: 'deepseek/deepseek-chat',
+    context: '64k tokens',
+    inputPrice: 0.14,
+    outputPrice: 0.28,
+    speed: '~70 tok/sec',
+    isFree: false
+  },
+  {
+    name: 'deepseek/deepseek-reasoner',
+    id: 'deepseek/deepseek-reasoner',
+    context: '64k tokens',
+    inputPrice: 0.55,
+    outputPrice: 2.19,
+    speed: '~30 tok/sec',
+    isFree: false
+  },
+  {
+    name: 'google/gemini-2.5-pro',
+    id: 'google/gemini-2.5-pro',
+    context: '2M tokens',
+    inputPrice: 1.25,
+    outputPrice: 5.00,
+    speed: '~60 tok/sec',
+    isFree: false
+  },
+  {
+    name: 'google/gemini-2.5-flash',
+    id: 'google/gemini-2.5-flash',
+    context: '1M tokens',
+    inputPrice: 0.075,
+    outputPrice: 0.30,
+    speed: '~130 tok/sec',
+    isFree: false
+  },
+  {
+    name: 'openai/gpt-4o-mini',
+    id: 'openai/gpt-4o-mini',
+    context: '128k tokens',
+    inputPrice: 0.15,
+    outputPrice: 0.60,
+    speed: '~140 tok/sec',
     isFree: false
   }
 ];
@@ -3179,7 +3224,51 @@ const FREE_MODELS = [
     speed: '~94 tok/sec',
     isFree: true,
     bestFor: 'Coding, debugging',
-    limits: '20 req/min, 200 req/day'
+    limits: '20 req/min'
+  },
+  {
+    name: 'google/gemini-2.5-flash:free',
+    id: 'google/gemini-2.5-flash:free',
+    context: '1M tokens',
+    inputPrice: 0.00,
+    outputPrice: 0.00,
+    speed: '~130 tok/sec',
+    isFree: true,
+    bestFor: 'Multimodal, fast coding',
+    limits: '15 req/min'
+  },
+  {
+    name: 'google/gemini-2.0-flash-exp:free',
+    id: 'google/gemini-2.0-flash-exp:free',
+    context: '1M tokens',
+    inputPrice: 0.00,
+    outputPrice: 0.00,
+    speed: '~120 tok/sec',
+    isFree: true,
+    bestFor: 'Experimental features, speed',
+    limits: '10 req/min'
+  },
+  {
+    name: 'qwen/qwen-2.5-coder-32b-instruct:free',
+    id: 'qwen/qwen-2.5-coder-32b-instruct:free',
+    context: '32k tokens',
+    inputPrice: 0.00,
+    outputPrice: 0.00,
+    speed: '~65 tok/sec',
+    isFree: true,
+    bestFor: 'Open-source coding model',
+    limits: '20 req/min'
+  },
+  {
+    name: 'meta-llama/llama-3.3-70b-instruct:free',
+    id: 'meta-llama/llama-3.3-70b-instruct:free',
+    context: '128k tokens',
+    inputPrice: 0.00,
+    outputPrice: 0.00,
+    speed: '~55 tok/sec',
+    isFree: true,
+    bestFor: 'Complex reasoning, general instruction',
+    limits: '15 req/min'
   },
   {
     name: 'meta-llama/llama-3.1-8b-instruct:free',
@@ -3189,8 +3278,8 @@ const FREE_MODELS = [
     outputPrice: 0.00,
     speed: '~110 tok/sec',
     isFree: true,
-    bestFor: 'General chat, summarization',
-    limits: '20 req/min, 200 req/day'
+    bestFor: 'Lightweight instructions',
+    limits: '20 req/min'
   }
 ];
 
@@ -3218,37 +3307,48 @@ Rules:
 `;
 
 function printBoxLine(content: string, colorFn: any) {
+  const width = 60;
   const cleanLen = content.replace(/\x1b\[[0-9;]*m/g, '').length;
-  const padding = 45 - cleanLen;
+  const padding = width - cleanLen;
   if (padding > 0) {
     console.log(colorFn('│ ') + content + ' '.repeat(padding - 1) + colorFn('│'));
   } else {
-    console.log(colorFn('│ ') + content.substring(0, 43) + colorFn('│'));
+    console.log(colorFn('│ ') + content.substring(0, width - 2) + colorFn('│'));
   }
 }
 
 function printPaidModels() {
-  console.log(chalk.bold.cyan('┌─────────────────────────────────────────────┐'));
-  console.log(chalk.bold.cyan('│  📦 PAID MODELS — OpenRouter                │'));
-  console.log(chalk.bold.cyan('├─────────────────────────────────────────────┤'));
+  const width = 60;
+  const borderTop    = `┌${'─'.repeat(width)}┐`;
+  const borderMiddle = `├${'─'.repeat(width)}┤`;
+  const borderBottom = `└${'─'.repeat(width)}┘`;
+
+  console.log(chalk.bold.cyan(borderTop));
+  console.log(chalk.bold.cyan(`│  📦 PAID MODELS — OpenRouter${' '.repeat(width - 28)}│`));
+  console.log(chalk.bold.cyan(borderMiddle));
   for (let i = 0; i < PAID_MODELS.length; i++) {
     const m = PAID_MODELS[i];
     printBoxLine(`[${i + 1}] ${m.name}`, chalk.cyan);
     printBoxLine(`    Context : ${m.context}`, chalk.cyan);
-    printBoxLine(`    Input   : $${m.inputPrice.toFixed(2)} / 1M tokens`, chalk.cyan);
-    printBoxLine(`    Output  : $${m.outputPrice.toFixed(2)} / 1M tokens`, chalk.cyan);
+    printBoxLine(`    Input   : $${m.inputPrice.toFixed(4)} / 1M tokens`, chalk.cyan);
+    printBoxLine(`    Output  : $${m.outputPrice.toFixed(4)} / 1M tokens`, chalk.cyan);
     printBoxLine(`    Speed   : ${m.speed}`, chalk.cyan);
     if (i < PAID_MODELS.length - 1) {
-      console.log(chalk.bold.cyan('├─────────────────────────────────────────────┤'));
+      console.log(chalk.bold.cyan(borderMiddle));
     }
   }
-  console.log(chalk.bold.cyan('└─────────────────────────────────────────────┘'));
+  console.log(chalk.bold.cyan(borderBottom));
 }
 
 function printFreeModels() {
-  console.log(chalk.bold.cyan('┌─────────────────────────────────────────────┐'));
-  console.log(chalk.bold.cyan('│  🆓 FREE MODELS — OpenRouter                │'));
-  console.log(chalk.bold.cyan('├─────────────────────────────────────────────┤'));
+  const width = 60;
+  const borderTop    = `┌${'─'.repeat(width)}┐`;
+  const borderMiddle = `├${'─'.repeat(width)}┤`;
+  const borderBottom = `└${'─'.repeat(width)}┘`;
+
+  console.log(chalk.bold.cyan(borderTop));
+  console.log(chalk.bold.cyan(`│  🆓 FREE MODELS — OpenRouter${' '.repeat(width - 28)}│`));
+  console.log(chalk.bold.cyan(borderMiddle));
   for (let i = 0; i < FREE_MODELS.length; i++) {
     const m = FREE_MODELS[i];
     printBoxLine(`[${i + 1}] ${m.name}`, chalk.cyan);
@@ -3257,10 +3357,10 @@ function printFreeModels() {
     printBoxLine(`    Best for: ${m.bestFor || ''}`, chalk.cyan);
     printBoxLine(`    Limits  : ${m.limits || ''}`, chalk.cyan);
     if (i < FREE_MODELS.length - 1) {
-      console.log(chalk.bold.cyan('├─────────────────────────────────────────────┤'));
+      console.log(chalk.bold.cyan(borderMiddle));
     }
   }
-  console.log(chalk.bold.cyan('└─────────────────────────────────────────────┘'));
+  console.log(chalk.bold.cyan(borderBottom));
 }
 
 async function handleModelCommand() {
@@ -3281,7 +3381,7 @@ async function handleModelCommand() {
   logger.success(`Active OpenRouter model set to: ${chalk.bold(openRouterModel)}`);
 }
 
-async function handleFreeloadersCommand() {
+async function handleFreemodelsCommand() {
   printFreeModels();
   const choice = await askUser('  Select model [1-N] : ');
   const trimmed = choice.trim();
@@ -4542,12 +4642,12 @@ async function startShell() {
     if (cols >= 60) {
       console.log(chalk.bold.white(figletFullText));
       console.log(chalk.bold.white('\n                JULES  C L I   —  research preview Developer: Rev'));
-      console.log(chalk.bold.white('                Version: 2.0'));
+      console.log(chalk.bold.white('                Version: 2.5'));
     } else if (cols >= 40) {
       console.log(chalk.bold.white('[ JULES CLI ] ') + chalk.dim('— research preview Developer: Rev'));
-      console.log(chalk.bold.white('                Version: 2.0'));
+      console.log(chalk.bold.white('                Version: 2.5'));
     } else {
-      console.log(chalk.bold.white('JULES CLI — Rev v2.0'));
+      console.log(chalk.bold.white('JULES CLI — Rev v2.5'));
     }
   }
 
@@ -4619,7 +4719,7 @@ async function startShell() {
   console.log(chalk.white('  1. Run ') + chalk.bold.cyan('/init') + chalk.white(' to link this directory to a shadow repository'));
   console.log(chalk.white('  2. Type your coding instruction and press ') + chalk.bold('Enter') + chalk.white(' to edit files\n'));
 
-  const commandsList = ['/init', '/newrepo', '/repo', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/diff', '/revert', '/help', '/docs', '/shot', '/deleteworkspace', '/exit', '/open', '/exitmode', '/model', '/freeloaders', '/chatmode'];
+  const commandsList = ['/init', '/newrepo', '/repo', '/sync', '/edit', '/restore', '/session', '/usage', '/plan', '/fast', '/clear', '/diff', '/revert', '/help', '/docs', '/shot', '/deleteworkspace', '/exit', '/open', '/exitmode', '/model', '/freemodels', '/chatmode'];
 
   const PROMPT_STR = '> ';
   const PROMPT_LEN = PROMPT_STR.length;
@@ -5784,7 +5884,7 @@ async function startShell() {
           }
           break;
         case '/open':
-          dotenv.config();
+          dotenv.config({ override: true });
           const apiKey = process.env.OPENROUTER_API_KEY;
           if (!apiKey) {
             console.log(chalk.bold.red('\n  .env Setup Guide (Missing OPENROUTER_API_KEY):'));
@@ -5820,13 +5920,13 @@ async function startShell() {
             }
           }
           break;
-        case '/freeloaders':
+        case '/freemodels':
           if (!isOpenMode) {
             logger.error('This command is only available in Open Mode (/open).');
           } else {
             try {
               if (!(rl as any).closed) rl.pause();
-              await handleFreeloadersCommand();
+              await handleFreemodelsCommand();
             } finally {
               if (!(rl as any).closed) rl.resume();
             }
@@ -5923,6 +6023,11 @@ async function startShell() {
           cmd('/clear',                  'Clear terminal');
           cmd('/diff [args]',            'Show git diff of changes');
           cmd('/revert [args]',          'Undo last Jules action/commit');
+          cmd('/open',                   'Activate Open Mode (routes requests to OpenRouter)');
+          cmd('/exitmode',               'Exit Open Mode and switch back to Jules AI');
+          cmd('/model',                  'Select/change active model in Open Mode');
+          cmd('/freemodels',             'Select a free model in Open Mode');
+          cmd('/chatmode',               'Scan project files and chat (Open Mode)');
           cmd('/help',                   'Show this menu');
           cmd('/exit',                   'Quit');
           console.log('');
@@ -6040,7 +6145,7 @@ async function startShell() {
 program
   .name('jules-local')
   .description('Bridge between local files and Google Jules API')
-  .version('2.0');
+  .version('2.5');
 
 program
   .command('init')
@@ -6131,7 +6236,7 @@ program
 // If no arguments, start shell
 if (require.main === module) {
   // 1. Load .env
-  dotenv.config();
+  dotenv.config({ override: true });
 
   // 2. Auto-append missing fields if needed
   ensureEnvFields();

@@ -1,6 +1,6 @@
 {
   "name": "jules-cli",
-  "version": "2.0",
+  "version": "2.5",
   "description": "Jules CLI - Google DeepMind Sync Engine",
   "main": "dist/index.js",
   "bin": {
